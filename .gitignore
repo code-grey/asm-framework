@@ -1,0 +1,16 @@
+# ASM Framework build and runtime files
+/asm
+/asm.db
+/asm.db-journal
+*.out
+*.json
+
+# Go workspace files
+vendor/
+/go.work
+/go.work.sum
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
