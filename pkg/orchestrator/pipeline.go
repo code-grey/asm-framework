@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,12 +18,19 @@ type ResultSummary struct {
 	NewSubdomains     []string
 	TotalPorts        int
 	NewPorts          []runner.PortResult
+	TotalWebServices  int
+	NewWebServices    []storage.WebService
+	TotalEndpoints    int
+	NewEndpoints      []storage.Endpoint
 }
 
 type Pipeline struct {
 	storage          storage.Storage
 	subdomainRunners []runner.SubdomainRunner
+	dnsResolver      *runner.Puredns
 	portScanners     []runner.PortScanner
+	webProber        *runner.Httpx
+	endpointScraper  *runner.Gau
 	workerCount      int
 }
 
@@ -37,8 +45,20 @@ func (p *Pipeline) AddSubdomainRunner(r runner.SubdomainRunner) {
 	p.subdomainRunners = append(p.subdomainRunners, r)
 }
 
+func (p *Pipeline) SetDNSResolver(r *runner.Puredns) {
+	p.dnsResolver = r
+}
+
 func (p *Pipeline) AddPortScanner(r runner.PortScanner) {
 	p.portScanners = append(p.portScanners, r)
+}
+
+func (p *Pipeline) SetWebProber(r *runner.Httpx) {
+	p.webProber = r
+}
+
+func (p *Pipeline) SetEndpointScraper(r *runner.Gau) {
+	p.endpointScraper = r
 }
 
 func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSummary, error) {
@@ -249,13 +269,16 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 
 		summary.TotalPorts = len(allPorts)
 
+		var webTargets []string
+		portIDMap := make(map[string]int64) // maps URL to Port ID
+
 		for _, res := range allPorts {
 			subID, exists := subdomainIDMap[res.Target]
 			if !exists {
 				continue
 			}
 			
-			_, isNew, err := p.storage.AddPort(subID, res.Number, res.Service, res.Version, res.State)
+			portDB, isNew, err := p.storage.AddPort(subID, res.Number, res.Service, res.Version, res.State)
 			if err != nil {
 				log.Printf("\r[!] Error saving port %d on %s: %v\n", res.Number, res.Target, err)
 				continue
@@ -263,7 +286,88 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 			if isNew {
 				summary.NewPorts = append(summary.NewPorts, res)
 			}
+
+			// Collect web targets for httpx (HTTP/HTTPS)
+			if strings.Contains(res.Service, "http") || res.Number == 80 || res.Number == 443 || res.Number == 8080 || res.Number == 8443 {
+				scheme := "http://"
+				if strings.Contains(res.Service, "https") || res.Number == 443 || res.Number == 8443 {
+					scheme = "https://"
+				}
+				url := fmt.Sprintf("%s%s:%d", scheme, res.Target, res.Number)
+				webTargets = append(webTargets, url)
+				portIDMap[url] = portDB.ID
+			}
 		}
+
+		// 3. Web Probing (httpx)
+		var liveWebServices []string // URLs for GAU to scan
+		if p.webProber != nil && len(webTargets) > 0 {
+			fmt.Printf("[*] Probing %d web services with httpx...\n", len(webTargets))
+			httpxResults, err := p.webProber.Run(ctx, webTargets)
+			if err == nil {
+				summary.TotalWebServices = len(httpxResults)
+				for _, ws := range httpxResults {
+					portID, ok := portIDMap[ws.URL]
+					if !ok {
+						continue // fallback
+					}
+					
+					// Convert tech slice to comma string
+					techStr := ""
+					if len(ws.Tech) > 0 {
+						// Simple join, can be modified to JSON later
+						techStr = " [" + strings.Join(ws.Tech, ", ") + "]"
+					}
+
+					wsDB, isNew, err := p.storage.AddWebService(portID, ws.URL, ws.Title, ws.StatusCode, techStr)
+					if err != nil {
+						log.Printf("[!] Error saving web service %s: %v\n", ws.URL, err)
+						continue
+					}
+					if isNew {
+						summary.NewWebServices = append(summary.NewWebServices, wsDB)
+					}
+					liveWebServices = append(liveWebServices, ws.URL)
+				}
+			}
+		}
+
+		// 4. Endpoint Scraping (gau)
+		if p.endpointScraper != nil && len(liveWebServices) > 0 && deep {
+			fmt.Printf("[*] Deep Scraping endpoints for %d live websites with gau...\n", len(liveWebServices))
+			
+			// We iterate sequentially to not hammer alienvault, or use a smaller worker pool
+			for _, targetURL := range liveWebServices {
+				if ctx.Err() != nil {
+					break
+				}
+				
+				// Need subdomainID to save
+				// Naive extraction: https://sub.domain.com:443 -> sub.domain.com
+				hostPart := strings.TrimPrefix(targetURL, "http://")
+				hostPart = strings.TrimPrefix(hostPart, "https://")
+				if idx := strings.Index(hostPart, ":"); idx != -1 {
+					hostPart = hostPart[:idx]
+				}
+				
+				subID, exists := subdomainIDMap[hostPart]
+				if !exists {
+					continue
+				}
+
+				urls, err := p.endpointScraper.Run(ctx, targetURL)
+				if err == nil {
+					summary.TotalEndpoints += len(urls)
+					for _, u := range urls {
+						epDB, isNew, err := p.storage.AddEndpoint(subID, u)
+						if err == nil && isNew {
+							summary.NewEndpoints = append(summary.NewEndpoints, epDB)
+						}
+					}
+				}
+			}
+		}
+
 	}
 
 	return summary, nil

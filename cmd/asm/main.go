@@ -79,7 +79,10 @@ func main() {
 	pipeline := orchestrator.NewPipeline(store)
 	pipeline.AddSubdomainRunner(runner.NewSubfinder())
 	pipeline.AddSubdomainRunner(runner.NewAmass())
+	pipeline.SetDNSResolver(runner.NewPuredns())
 	pipeline.AddPortScanner(runner.NewNmap())
+	pipeline.SetWebProber(runner.NewHttpx())
+	pipeline.SetEndpointScraper(runner.NewGau())
 
 	if !*jsonOut {
 		fmt.Printf("========================================\n")
