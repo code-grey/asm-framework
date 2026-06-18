@@ -39,6 +39,27 @@ type Endpoint struct {
 	DiscoveredAt time.Time `json:"discovered_at"`
 }
 
+// Vulnerability represents a vulnerability found by Nuclei
+type Vulnerability struct {
+	ID           int64     `json:"id"`
+	PortID       int64     `json:"port_id"`
+	TemplateID   string    `json:"template_id"`
+	Name         string    `json:"name"`
+	Severity     string    `json:"severity"`
+	MatchedAt    string    `json:"matched_at"`
+	DiscoveredAt time.Time `json:"discovered_at"`
+}
+
+// Scan represents a tool execution status
+type Scan struct {
+	ID         int64      `json:"id"`
+	Target     string     `json:"target"`
+	Tool       string     `json:"tool"`
+	Status     string     `json:"status"` // "running", "completed", "failed"
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+}
+
 // Storage defines the interface for data persistence.
 type Storage interface {
 	Init() error
@@ -47,8 +68,15 @@ type Storage interface {
 	AddPort(subdomainID int64, number int, service, version, state string) (Port, bool, error)
 	AddWebService(portID int64, url, title string, statusCode int, techStack string) (WebService, bool, error)
 	AddEndpoint(subdomainID int64, url string) (Endpoint, bool, error)
+	AddVulnerability(portID int64, templateID, name, severity, matchedAt string) (Vulnerability, bool, error)
 	GetSubdomains() ([]Subdomain, error)
 	GetPorts(subdomainID int64) ([]Port, error)
 	GetWebServices(portID int64) ([]WebService, error)
 	GetEndpoints(subdomainID int64) ([]Endpoint, error)
+	GetVulnerabilities(portID int64) ([]Vulnerability, error)
+
+	// Scan tracking
+	UpdateScanStatus(target, tool, status string) error
+	GetScans(target string) ([]Scan, error)
 }
+

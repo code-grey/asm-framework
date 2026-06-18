@@ -1,11 +1,12 @@
 package runner
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type Subfinder struct{}
@@ -19,29 +20,35 @@ func (s *Subfinder) Name() string {
 }
 
 func (s *Subfinder) Run(ctx context.Context, target string, deep bool) ([]string, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
 	args := []string{"-d", target, "-silent"}
 	if deep {
 		args = append(args, "-all") // Use all sources in deep mode
 	}
-	cmd := exec.CommandContext(ctx, "subfinder", args...)
+	cmd := exec.CommandContext(timeoutCtx, "subfinder", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdin = nil
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	err := cmd.Run()
+	
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
 	}
 
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
 	var subdomains []string
-	lines := strings.Split(out.String(), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		trimmed := strings.TrimSpace(scanner.Text())
 		if trimmed != "" {
 			subdomains = append(subdomains, trimmed)
 		}
 	}
+
+	_ = cmd.Wait()
 
 	return subdomains, nil
 }

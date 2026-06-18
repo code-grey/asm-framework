@@ -1,12 +1,13 @@
 package runner
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"encoding/json"
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type HttpxResult struct {
@@ -33,30 +34,36 @@ func (h *Httpx) Run(ctx context.Context, targets []string) ([]HttpxResult, error
 		return nil, nil
 	}
 
-	// Output as JSON to easily extract Title and Tech stacks
-	cmd := exec.CommandContext(ctx, "httpx", "-silent", "-json", "-tech-detect", "-title", "-status-code")
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(timeoutCtx, "httpx", "-silent", "-json", "-tech-detect", "-title", "-status-code")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	
 	cmd.Stdin = strings.NewReader(strings.Join(targets, "\n"))
 	
-	var out bytes.Buffer
-	cmd.Stdout = &out
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
 
-	_ = cmd.Run() // ignore exit status
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
 
 	var results []HttpxResult
-	lines := strings.Split(out.String(), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		trimmed := strings.TrimSpace(scanner.Text())
 		if trimmed == "" {
 			continue
 		}
-		
 		var res HttpxResult
 		if err := json.Unmarshal([]byte(trimmed), &res); err == nil {
 			results = append(results, res)
 		}
 	}
+
+	_ = cmd.Wait()
 
 	return results, nil
 }

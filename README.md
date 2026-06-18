@@ -21,31 +21,35 @@ All gathered intelligence is deduplicated in memory and permanently persisted to
 *   The required external binaries (listed below) are installed and available in the system `$PATH`.
 *   You have explicit permission to scan the target domains.
 
-## Prerequisites
+## Our Unique Selling Proposition (USP)
 
-The framework is an orchestrator; it does not replace the security tools. You must have the following installed on your system:
+In a landscape crowded with heavily funded, cloud-tethered "Agentic AI" security platforms, our framework differentiates itself through three core tenets:
 
-*   **Go** (1.20+)
-*   **Nmap**
-*   **Subfinder** (`go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest`)
-*   **Amass** (v4.x installed natively, not via broken shell wrappers)
-*   **Massdns** (Required dependency for puredns)
-*   **Puredns** (`go install github.com/d3mondev/puredns/v2@latest`)
-*   **Httpx** (`go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest`)
-*   **Gau** (`go install github.com/lc/gau/v2/cmd/gau@latest`)
+1.  **Air-Gapped & Local-First AI:** We integrate with local LLMs (like Ollama) rather than relying on OpenAI or cloud APIs. This ensures that highly sensitive corporate infrastructure maps and vulnerability data never leave your network, making it compliant for defense, finance, and healthcare environments.
+2.  **Frictionless Deployment:** No Kubernetes, no Docker, no heavy appliances. The framework is designed to compile into a standalone binary, allowing a security engineer to simply `scp` the tool onto an internal jump-box and execute autonomous scans instantly.
+3.  **Deterministic Execution for Autonomous Agents:** LLMs are great at reasoning but terrible at deterministic execution. We provide the lightning-fast, Go-native sensory engine (Subfinder, Naabu, Httpx) that grounds Autonomous Red Team agents in reality, giving them the structured SQLite data they need to act without hallucinating.
 
-Ensure all tools, especially those installed via `go install`, are accessible globally (e.g., symlinked to `/usr/local/bin/`).
+## Prerequisites & Installation
 
-## Installation
+The framework is an orchestrator; it relies on external security tools. We provide a `setup.sh` script to automate the installation of all dependencies on Kali Linux / Ubuntu systems.
 
-Clone the repository and compile the Go binary:
+1. Clone the repository:
+   ```bash
+   git clone <repository_url>
+   cd asm-framework
+   ```
 
-```bash
-git clone <repository_url>
-cd asm-framework
-go mod tidy
-go build -ldflags="-s -w" -trimpath -o asm ./cmd/asm
-```
+2. Run the automated setup script to install all dependencies (`nmap`, `amass`, `subfinder`, `httpx`, `gau`, `nuclei`, `puredns`, `exploitdb`, `massdns`):
+   ```bash
+   chmod +x setup.sh
+   ./setup.sh
+   ```
+
+3. Compile the Go binary:
+   ```bash
+   go mod tidy
+   go build -ldflags="-s -w" -trimpath -o asm ./cmd/asm/main.go
+   ```
 
 ## Usage
 

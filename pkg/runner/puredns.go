@@ -1,14 +1,14 @@
 package runner
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
-// Puredns filters a list of subdomains and returns only those that resolve to live IPs.
 type Puredns struct{}
 
 func NewPuredns() *Puredns {
@@ -24,29 +24,32 @@ func (p *Puredns) Run(ctx context.Context, targets []string) ([]string, error) {
 		return nil, nil
 	}
 
-	// We pass the targets via Stdin
-	cmd := exec.CommandContext(ctx, "puredns", "resolve", "-q")
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(timeoutCtx, "puredns", "resolve", "-q")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	
 	cmd.Stdin = strings.NewReader(strings.Join(targets, "\n"))
 	
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	err := cmd.Run()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		// puredns might exit 1 if some domains fail to resolve, which is fine.
-		// We only care about the stdout
+		return nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
 	}
 
 	var live []string
-	lines := strings.Split(out.String(), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		trimmed := strings.TrimSpace(scanner.Text())
 		if trimmed != "" {
 			live = append(live, trimmed)
 		}
 	}
+
+	_ = cmd.Wait()
 
 	return live, nil
 }

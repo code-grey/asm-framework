@@ -20,6 +20,14 @@ func NewSQLiteStorage(dbPath string) (*SQLiteStorage, error) {
 }
 
 func (s *SQLiteStorage) Init() error {
+	// Enable performance pragmas
+	_, _ = s.db.Exec(`
+		PRAGMA journal_mode = WAL;
+		PRAGMA synchronous = NORMAL;
+		PRAGMA cache_size = -64000;
+		PRAGMA temp_store = MEMORY;
+	`)
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS subdomains (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +65,28 @@ func (s *SQLiteStorage) Init() error {
 		discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(subdomain_id) REFERENCES subdomains(id)
 	);
+
+	CREATE TABLE IF NOT EXISTS vulnerabilities (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		port_id INTEGER NOT NULL,
+		template_id TEXT NOT NULL,
+		name TEXT NOT NULL,
+		severity TEXT NOT NULL,
+		matched_at TEXT NOT NULL,
+		discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY(port_id) REFERENCES ports(id),
+		UNIQUE(port_id, template_id, matched_at)
+	);
+
+	CREATE TABLE IF NOT EXISTS scans (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		target TEXT NOT NULL,
+		tool TEXT NOT NULL,
+		status TEXT NOT NULL,
+		started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		finished_at DATETIME,
+		UNIQUE(target, tool)
+	);
 	`
 	_, err := s.db.Exec(schema)
 	if err != nil {
@@ -77,102 +107,79 @@ func (s *SQLiteStorage) AddSubdomain(domain string) (Subdomain, bool, error) {
 	var sub Subdomain
 	var isNew bool
 
-	// Check if exists
-	err := s.db.QueryRow("SELECT id, domain, discovered_at FROM subdomains WHERE domain = ?", domain).
-		Scan(&sub.ID, &sub.Domain, &sub.DiscoveredAt)
-
-	if err == sql.ErrNoRows {
-		// Insert
-		res, err := s.db.Exec("INSERT INTO subdomains (domain, discovered_at) VALUES (?, ?)", domain, time.Now())
-		if err != nil {
-			return sub, false, err
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			return sub, false, err
-		}
-		sub.ID = id
-		sub.Domain = domain
-		sub.DiscoveredAt = time.Now()
-		isNew = true
-	} else if err != nil {
+	// Upsert query
+	_, err := s.db.Exec(`
+		INSERT INTO subdomains (domain, discovered_at) VALUES (?, ?)
+		ON CONFLICT(domain) DO NOTHING
+	`, domain, time.Now())
+	
+	if err != nil {
 		return sub, false, err
 	}
 
-	return sub, isNew, nil
+	err = s.db.QueryRow("SELECT id, domain, discovered_at FROM subdomains WHERE domain = ?", domain).
+		Scan(&sub.ID, &sub.Domain, &sub.DiscoveredAt)
+		
+	// If the discovered_at time is very close to now, it's newly inserted
+	if time.Since(sub.DiscoveredAt) < time.Second {
+		isNew = true
+	}
+
+	return sub, isNew, err
 }
 
 func (s *SQLiteStorage) AddPort(subdomainID int64, number int, service, version, state string) (Port, bool, error) {
 	var port Port
 	var isNew bool
 
-	err := s.db.QueryRow("SELECT id, subdomain_id, number, service, version, state, discovered_at FROM ports WHERE subdomain_id = ? AND number = ?", subdomainID, number).
-		Scan(&port.ID, &port.SubdomainID, &port.Number, &port.Service, &port.Version, &port.State, &port.DiscoveredAt)
-
-	if err == sql.ErrNoRows {
-		res, err := s.db.Exec("INSERT INTO ports (subdomain_id, number, service, version, state, discovered_at) VALUES (?, ?, ?, ?, ?, ?)",
-			subdomainID, number, service, version, state, time.Now())
-		if err != nil {
-			return port, false, err
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			return port, false, err
-		}
-		port.ID = id
-		port.SubdomainID = subdomainID
-		port.Number = number
-		port.Service = service
-		port.Version = version
-		port.State = state
-		port.DiscoveredAt = time.Now()
-		isNew = true
-	} else if err != nil {
-		// Let's update version if the existing one is empty
-		if port.Version == "" && version != "" {
-			_, _ = s.db.Exec("UPDATE ports SET version = ?, service = ? WHERE id = ?", version, service, port.ID)
-			port.Version = version
-			port.Service = service
-		}
+	_, err := s.db.Exec(`
+		INSERT INTO ports (subdomain_id, number, service, version, state, discovered_at) 
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(subdomain_id, number) DO UPDATE SET 
+		version = excluded.version,
+		service = excluded.service,
+		state = excluded.state
+	`, subdomainID, number, service, version, state, time.Now())
+	
+	if err != nil {
 		return port, false, err
 	}
 
-	return port, isNew, nil
+	err = s.db.QueryRow("SELECT id, subdomain_id, number, service, version, state, discovered_at FROM ports WHERE subdomain_id = ? AND number = ?", subdomainID, number).
+		Scan(&port.ID, &port.SubdomainID, &port.Number, &port.Service, &port.Version, &port.State, &port.DiscoveredAt)
+
+	if err == nil && time.Since(port.DiscoveredAt) < time.Second {
+		isNew = true
+	}
+
+	return port, isNew, err
 }
 
 func (s *SQLiteStorage) AddWebService(portID int64, url, title string, statusCode int, techStack string) (WebService, bool, error) {
 	var ws WebService
 	var isNew bool
 
-	err := s.db.QueryRow("SELECT id, port_id, url, title, status_code, tech_stack, discovered_at FROM web_services WHERE url = ?", url).
-		Scan(&ws.ID, &ws.PortID, &ws.URL, &ws.Title, &ws.StatusCode, &ws.TechStack, &ws.DiscoveredAt)
+	_, err := s.db.Exec(`
+		INSERT INTO web_services (port_id, url, title, status_code, tech_stack, discovered_at) 
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(url) DO UPDATE SET 
+		title = excluded.title,
+		status_code = excluded.status_code,
+		tech_stack = excluded.tech_stack
+	`, portID, url, title, statusCode, techStack, time.Now())
 
-	if err == sql.ErrNoRows {
-		res, err := s.db.Exec("INSERT INTO web_services (port_id, url, title, status_code, tech_stack, discovered_at) VALUES (?, ?, ?, ?, ?, ?)",
-			portID, url, title, statusCode, techStack, time.Now())
-		if err != nil {
-			return ws, false, err
-		}
-		id, err := res.LastInsertId()
-		if err != nil {
-			return ws, false, err
-		}
-		ws.ID = id
-		ws.PortID = portID
-		ws.URL = url
-		ws.Title = title
-		ws.StatusCode = statusCode
-		ws.TechStack = techStack
-		ws.DiscoveredAt = time.Now()
-		isNew = true
-	} else if err != nil {
+	if err != nil {
 		return ws, false, err
-	} else {
-		// Update title/status/tech if it already existed but might have changed
-		_, _ = s.db.Exec("UPDATE web_services SET title = ?, status_code = ?, tech_stack = ? WHERE id = ?", title, statusCode, techStack, ws.ID)
 	}
 
-	return ws, isNew, nil
+	err = s.db.QueryRow("SELECT id, port_id, url, title, status_code, tech_stack, discovered_at FROM web_services WHERE url = ?", url).
+		Scan(&ws.ID, &ws.PortID, &ws.URL, &ws.Title, &ws.StatusCode, &ws.TechStack, &ws.DiscoveredAt)
+
+	if err == nil && time.Since(ws.DiscoveredAt) < time.Second {
+		isNew = true
+	}
+
+	return ws, isNew, err
 }
 
 func (s *SQLiteStorage) AddEndpoint(subdomainID int64, url string) (Endpoint, bool, error) {
@@ -202,6 +209,30 @@ func (s *SQLiteStorage) AddEndpoint(subdomainID int64, url string) (Endpoint, bo
 	}
 
 	return ep, isNew, nil
+}
+
+func (s *SQLiteStorage) AddVulnerability(portID int64, templateID, name, severity, matchedAt string) (Vulnerability, bool, error) {
+	var vuln Vulnerability
+	var isNew bool
+
+	_, err := s.db.Exec(`
+		INSERT INTO vulnerabilities (port_id, template_id, name, severity, matched_at, discovered_at) 
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(port_id, template_id, matched_at) DO NOTHING
+	`, portID, templateID, name, severity, matchedAt, time.Now())
+
+	if err != nil {
+		return vuln, false, err
+	}
+
+	err = s.db.QueryRow("SELECT id, port_id, template_id, name, severity, matched_at, discovered_at FROM vulnerabilities WHERE port_id = ? AND template_id = ? AND matched_at = ?", portID, templateID, matchedAt).
+		Scan(&vuln.ID, &vuln.PortID, &vuln.TemplateID, &vuln.Name, &vuln.Severity, &vuln.MatchedAt, &vuln.DiscoveredAt)
+
+	if err == nil && time.Since(vuln.DiscoveredAt) < time.Second {
+		isNew = true
+	}
+
+	return vuln, isNew, err
 }
 
 func (s *SQLiteStorage) GetSubdomains() ([]Subdomain, error) {
@@ -275,3 +306,62 @@ func (s *SQLiteStorage) GetEndpoints(subdomainID int64) ([]Endpoint, error) {
 	}
 	return eps, nil
 }
+
+func (s *SQLiteStorage) GetVulnerabilities(portID int64) ([]Vulnerability, error) {
+	rows, err := s.db.Query("SELECT id, port_id, template_id, name, severity, matched_at, discovered_at FROM vulnerabilities WHERE port_id = ?", portID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var vulns []Vulnerability
+	for rows.Next() {
+		var vuln Vulnerability
+		if err := rows.Scan(&vuln.ID, &vuln.PortID, &vuln.TemplateID, &vuln.Name, &vuln.Severity, &vuln.MatchedAt, &vuln.DiscoveredAt); err != nil {
+			return nil, err
+		}
+		vulns = append(vulns, vuln)
+	}
+	return vulns, nil
+}
+
+func (s *SQLiteStorage) UpdateScanStatus(target, tool, status string) error {
+	var finishedAt interface{}
+	if status == "completed" || status == "failed" {
+		finishedAt = time.Now()
+	} else {
+		finishedAt = nil
+	}
+
+	_, err := s.db.Exec(`
+		INSERT INTO scans (target, tool, status, started_at, finished_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(target, tool) DO UPDATE SET
+		status = excluded.status,
+		finished_at = excluded.finished_at
+	`, target, tool, status, time.Now(), finishedAt)
+	return err
+}
+
+func (s *SQLiteStorage) GetScans(target string) ([]Scan, error) {
+	rows, err := s.db.Query("SELECT id, target, tool, status, started_at, finished_at FROM scans WHERE target = ?", target)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var scans []Scan
+	for rows.Next() {
+		var scan Scan
+		var finishedAt sql.NullTime
+		if err := rows.Scan(&scan.ID, &scan.Target, &scan.Tool, &scan.Status, &scan.StartedAt, &finishedAt); err != nil {
+			return nil, err
+		}
+		if finishedAt.Valid {
+			scan.FinishedAt = &finishedAt.Time
+		}
+		scans = append(scans, scan)
+	}
+	return scans, nil
+}
+

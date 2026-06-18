@@ -1,12 +1,13 @@
 package runner
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"fmt"
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type Amass struct{}
@@ -20,6 +21,9 @@ func (a *Amass) Name() string {
 }
 
 func (a *Amass) Run(ctx context.Context, target string, deep bool) ([]string, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+
 	args := []string{"enum", "-d", target, "-nocolor"}
 	if deep {
 		args = append(args, "-active") // Active enumeration, pulls TLS certs, queries live infrastructure
@@ -27,29 +31,33 @@ func (a *Amass) Run(ctx context.Context, target string, deep bool) ([]string, er
 		args = append(args, "-passive") // Passive mode for speed
 	}
 
-	// Bypassing the broken /usr/bin/amass wrapper on Debian/Kali and calling the binary directly
-	cmd := exec.CommandContext(ctx, "/usr/lib/amass/amass", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdin = nil
-	var out bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
+	binPath := "amass"
+	if _, err := exec.LookPath("/usr/lib/amass/amass"); err == nil {
+		binPath = "/usr/lib/amass/amass"
+	}
 
-	err := cmd.Run()
+	cmd := exec.CommandContext(timeoutCtx, binPath, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("amass failed: %w, stderr: %s", err, strings.TrimSpace(stderr.String()))
+		return nil, err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("amass start failed: %w", err)
 	}
 
 	var subdomains []string
-	lines := strings.Split(out.String(), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Amass output can be messy, rudimentary filter for subdomains
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		trimmed := strings.TrimSpace(scanner.Text())
 		if trimmed != "" && strings.HasSuffix(trimmed, target) && !strings.Contains(trimmed, " ") {
 			subdomains = append(subdomains, trimmed)
 		}
 	}
+
+	_ = cmd.Wait()
 
 	return subdomains, nil
 }

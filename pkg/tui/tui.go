@@ -56,13 +56,20 @@ func RunTUI(store storage.Storage) error {
 	portTable.SetBorder(true).SetTitle(" Open Ports ")
 	portTable.SetSelectable(true, false)
 
+	// 4. Vulnerabilities Table
+	vulnTable := tview.NewTable().SetBorders(true)
+	vulnTable.SetBorder(true).SetTitle(" Vulnerabilities ")
+	vulnTable.SetSelectable(true, false)
+
 	// State trackers
 	var currentSubdomains []storage.Subdomain
+	var currentPorts []storage.Port
 
 	// Update Subdomains based on selected Root Domain
 	updateSubdomains := func(rootDomain string) {
 		subList.Clear()
 		portTable.Clear()
+		vulnTable.Clear()
 		
 		currentSubdomains = domainMap[rootDomain]
 		sort.Slice(currentSubdomains, func(i, j int) bool {
@@ -77,12 +84,12 @@ func RunTUI(store storage.Storage) error {
 	// Update Ports based on selected Subdomain
 	updatePorts := func(index int) {
 		portTable.Clear()
+		vulnTable.Clear()
 
 		portTable.SetCell(0, 0, tview.NewTableCell("Port").SetTextColor(tcell.ColorYellow).SetSelectable(false))
 		portTable.SetCell(0, 1, tview.NewTableCell("Service").SetTextColor(tcell.ColorYellow).SetSelectable(false))
 		portTable.SetCell(0, 2, tview.NewTableCell("Version").SetTextColor(tcell.ColorYellow).SetSelectable(false))
 		portTable.SetCell(0, 3, tview.NewTableCell("State").SetTextColor(tcell.ColorYellow).SetSelectable(false))
-		portTable.SetCell(0, 4, tview.NewTableCell("Discovered").SetTextColor(tcell.ColorYellow).SetSelectable(false))
 
 		if len(currentSubdomains) == 0 || index < 0 || index >= len(currentSubdomains) {
 			return
@@ -93,6 +100,7 @@ func RunTUI(store storage.Storage) error {
 		if err != nil {
 			return
 		}
+		currentPorts = ports
 
 		for i, p := range ports {
 			row := i + 1
@@ -100,7 +108,34 @@ func RunTUI(store storage.Storage) error {
 			portTable.SetCell(row, 1, tview.NewTableCell(p.Service).SetTextColor(tcell.ColorWhite))
 			portTable.SetCell(row, 2, tview.NewTableCell(p.Version).SetTextColor(tcell.ColorTeal))
 			portTable.SetCell(row, 3, tview.NewTableCell(p.State).SetTextColor(tcell.ColorGreen))
-			portTable.SetCell(row, 4, tview.NewTableCell(p.DiscoveredAt.Format("2006-01-02 15:04")).SetTextColor(tcell.ColorGray))
+		}
+	}
+
+	// Update Vulnerabilities based on selected Port
+	updateVulnerabilities := func(portIndex int) {
+		vulnTable.Clear()
+		vulnTable.SetCell(0, 0, tview.NewTableCell("ID").SetTextColor(tcell.ColorYellow).SetSelectable(false))
+		vulnTable.SetCell(0, 1, tview.NewTableCell("Severity").SetTextColor(tcell.ColorYellow).SetSelectable(false))
+		vulnTable.SetCell(0, 2, tview.NewTableCell("Name").SetTextColor(tcell.ColorYellow).SetSelectable(false))
+
+		if len(currentPorts) == 0 || portIndex < 0 || portIndex >= len(currentPorts) {
+			return
+		}
+
+		selectedPort := currentPorts[portIndex]
+		vulns, err := store.GetVulnerabilities(selectedPort.ID)
+		if err != nil {
+			return
+		}
+
+		for i, v := range vulns {
+			row := i + 1
+			vulnTable.SetCell(row, 0, tview.NewTableCell(v.TemplateID).SetTextColor(tcell.ColorWhite))
+			color := tcell.ColorRed
+			if v.Severity == "low" { color = tcell.ColorGreen }
+			if v.Severity == "medium" { color = tcell.ColorYellow }
+			vulnTable.SetCell(row, 1, tview.NewTableCell(v.Severity).SetTextColor(color))
+			vulnTable.SetCell(row, 2, tview.NewTableCell(v.Name).SetTextColor(tcell.ColorWhite))
 		}
 	}
 
@@ -113,6 +148,7 @@ func RunTUI(store storage.Storage) error {
 		updateSubdomains(mainText)
 		if len(currentSubdomains) > 0 {
 			updatePorts(0)
+			updateVulnerabilities(0)
 		}
 	})
 
@@ -129,6 +165,7 @@ func RunTUI(store storage.Storage) error {
 	// Navigation: Subdomain List
 	subList.SetChangedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
 		updatePorts(index)
+		updateVulnerabilities(0)
 	})
 
 	subList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
@@ -146,9 +183,26 @@ func RunTUI(store storage.Storage) error {
 	})
 
 	// Navigation: Port Table
+	portTable.SetSelectionChangedFunc(func(row, column int) {
+		updateVulnerabilities(row - 1)
+	})
+
 	portTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyLeft || event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyBackspace || event.Key() == tcell.KeyBackspace2 {
 			app.SetFocus(subList)
+			return nil
+		}
+		if event.Key() == tcell.KeyRight || event.Key() == tcell.KeyEnter {
+			app.SetFocus(vulnTable)
+			return nil
+		}
+		return event
+	})
+	
+	// Navigation: Vulnerabilities Table
+	vulnTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyLeft || event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyBackspace || event.Key() == tcell.KeyBackspace2 {
+			app.SetFocus(portTable)
 			return nil
 		}
 		return event
@@ -159,13 +213,15 @@ func RunTUI(store storage.Storage) error {
 		updateSubdomains(rootDomains[0])
 		if len(currentSubdomains) > 0 {
 			updatePorts(0)
+			updateVulnerabilities(0)
 		}
 	}
 
 	// Layout Setup
 	flex.AddItem(domainList, 0, 1, true).
 		AddItem(subList, 0, 2, false).
-		AddItem(portTable, 0, 2, false)
+		AddItem(portTable, 0, 2, false).
+		AddItem(vulnTable, 0, 2, false)
 
 	// Global Application Input Capture (Fixes the freeze/exit issue)
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {

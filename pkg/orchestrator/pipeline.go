@@ -22,6 +22,7 @@ type ResultSummary struct {
 	NewWebServices    []storage.WebService
 	TotalEndpoints    int
 	NewEndpoints      []storage.Endpoint
+	TotalVulnerabilities int
 }
 
 type Pipeline struct {
@@ -31,6 +32,8 @@ type Pipeline struct {
 	portScanners     []runner.PortScanner
 	webProber        *runner.Httpx
 	endpointScraper  *runner.Gau
+	nucleiScanner    *runner.Nuclei
+	exploitScanner   *runner.ExploitDB
 	workerCount      int
 }
 
@@ -61,6 +64,15 @@ func (p *Pipeline) SetEndpointScraper(r *runner.Gau) {
 	p.endpointScraper = r
 }
 
+func (p *Pipeline) SetNucleiScanner(r *runner.Nuclei) {
+	p.nucleiScanner = r
+}
+
+func (p *Pipeline) SetExploitScanner(r *runner.ExploitDB) {
+	p.exploitScanner = r
+}
+
+
 func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSummary, error) {
 	summary := &ResultSummary{
 		Target:        target,
@@ -86,12 +98,16 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 				return
 			}
 			
+			p.storage.UpdateScanStatus(target, runner.Name(), "running")
 			fmt.Printf("    - Running %s...\n", runner.Name())
 			subs, err := runner.Run(ctx, target, deep)
 			if err != nil {
 				log.Printf("    [!] Error running %s: %v\n", runner.Name(), err)
+				p.storage.UpdateScanStatus(target, runner.Name(), "failed")
 				return
 			}
+			p.storage.UpdateScanStatus(target, runner.Name(), "completed")
+			fmt.Printf("    [+] %s completed (%d subdomains)\n", runner.Name(), len(subs))
 			for _, sub := range subs {
 				select {
 				case <-ctx.Done():
@@ -148,17 +164,40 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 	summary.TotalSubdomains = len(uniqueSubs)
 	fmt.Printf("\r[*] Discovered %d unique subdomains\n", len(uniqueSubs))
 
+	var rawSubs []string
+	for sub := range uniqueSubs {
+		rawSubs = append(rawSubs, sub)
+	}
+
 	targetsToScan := make([]string, 0, len(uniqueSubs))
 	subdomainIDMap := make(map[string]int64)
 
-	for sub := range uniqueSubs {
+	// DNS Resolution Filtering
+	if p.dnsResolver != nil {
+		fmt.Printf("[*] Filtering dead subdomains with puredns...\n")
+		p.storage.UpdateScanStatus(target, "puredns", "running")
+		liveSubs, err := p.dnsResolver.Run(ctx, rawSubs)
+		if err != nil {
+			log.Printf("[!] Error running puredns: %v\n", err)
+			p.storage.UpdateScanStatus(target, "puredns", "failed")
+			// fallback to all if dns fails
+			targetsToScan = rawSubs
+		} else {
+			p.storage.UpdateScanStatus(target, "puredns", "completed")
+			targetsToScan = liveSubs
+			fmt.Printf("    [+] puredns filtered down to %d live subdomains\n", len(targetsToScan))
+		}
+	} else {
+		targetsToScan = rawSubs
+	}
+
+	for _, sub := range targetsToScan {
 		subDB, isNew, err := p.storage.AddSubdomain(sub)
 		if err != nil {
 			log.Printf("[!] Error saving subdomain %s: %v\n", sub, err)
 			continue
 		}
 		subdomainIDMap[sub] = subDB.ID
-		targetsToScan = append(targetsToScan, sub)
 		if isNew {
 			summary.NewSubdomains = append(summary.NewSubdomains, sub)
 		}
@@ -166,6 +205,7 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 
 	if len(p.portScanners) > 0 && len(targetsToScan) > 0 {
 		fmt.Printf("[*] Starting %s port scanning for %d targets using %d workers\n", mode, len(targetsToScan), p.workerCount)
+		p.storage.UpdateScanStatus(target, "nmap", "running")
 		
 		jobs := make(chan string, len(targetsToScan))
 		results := make(chan []runner.PortResult, len(targetsToScan)*5)
@@ -257,6 +297,7 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 			case <-ctx.Done():
 				stopSpinner2()
 				fmt.Println("\n[!] Pipeline cancelled during port scanning.")
+				p.storage.UpdateScanStatus(target, "nmap", "failed")
 				return summary, ctx.Err()
 			case resBatch, ok := <-results:
 				if !ok {
@@ -266,6 +307,7 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 			}
 		}
 		stopSpinner2()
+		p.storage.UpdateScanStatus(target, "nmap", "completed")
 
 		summary.TotalPorts = len(allPorts)
 
@@ -287,6 +329,20 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 				summary.NewPorts = append(summary.NewPorts, res)
 			}
 
+			// 2.5 ExploitDB Lookup (if version is present)
+			if p.exploitScanner != nil && res.Version != "" {
+				p.storage.UpdateScanStatus(target, "exploitdb", "running")
+				exploits, err := p.exploitScanner.Run(ctx, res.Version)
+				if err == nil && len(exploits) > 0 {
+					for _, exp := range exploits {
+						// Store exploit as a vulnerability for now
+						_, _, _ = p.storage.AddVulnerability(portDB.ID, "exploitdb", exp.Title, "high", exp.Path)
+						summary.TotalVulnerabilities++
+					}
+				}
+				p.storage.UpdateScanStatus(target, "exploitdb", "completed")
+			}
+
 			// Collect web targets for httpx (HTTP/HTTPS)
 			if strings.Contains(res.Service, "http") || res.Number == 80 || res.Number == 443 || res.Number == 8080 || res.Number == 8443 {
 				scheme := "http://"
@@ -303,6 +359,7 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 		var liveWebServices []string // URLs for GAU to scan
 		if p.webProber != nil && len(webTargets) > 0 {
 			fmt.Printf("[*] Probing %d web services with httpx...\n", len(webTargets))
+			p.storage.UpdateScanStatus(target, "httpx", "running")
 			httpxResults, err := p.webProber.Run(ctx, webTargets)
 			if err == nil {
 				summary.TotalWebServices = len(httpxResults)
@@ -329,43 +386,151 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 					}
 					liveWebServices = append(liveWebServices, ws.URL)
 				}
+				p.storage.UpdateScanStatus(target, "httpx", "completed")
+			} else {
+				p.storage.UpdateScanStatus(target, "httpx", "failed")
 			}
+			fmt.Printf("    [+] httpx probing completed\n")
 		}
 
 		// 4. Endpoint Scraping (gau)
 		if p.endpointScraper != nil && len(liveWebServices) > 0 && deep {
-			fmt.Printf("[*] Deep Scraping endpoints for %d live websites with gau...\n", len(liveWebServices))
+			fmt.Printf("[*] Deep Scraping endpoints for %d live websites with gau using %d workers...\n", len(liveWebServices), p.workerCount)
+			p.storage.UpdateScanStatus(target, "gau", "running")
 			
-			// We iterate sequentially to not hammer alienvault, or use a smaller worker pool
-			for _, targetURL := range liveWebServices {
-				if ctx.Err() != nil {
-					break
-				}
-				
-				// Need subdomainID to save
-				// Naive extraction: https://sub.domain.com:443 -> sub.domain.com
-				hostPart := strings.TrimPrefix(targetURL, "http://")
-				hostPart = strings.TrimPrefix(hostPart, "https://")
-				if idx := strings.Index(hostPart, ":"); idx != -1 {
-					hostPart = hostPart[:idx]
-				}
-				
-				subID, exists := subdomainIDMap[hostPart]
-				if !exists {
-					continue
-				}
+			gauJobs := make(chan string, len(liveWebServices))
+			var gauWg sync.WaitGroup
 
-				urls, err := p.endpointScraper.Run(ctx, targetURL)
-				if err == nil {
-					summary.TotalEndpoints += len(urls)
-					for _, u := range urls {
-						epDB, isNew, err := p.storage.AddEndpoint(subID, u)
-						if err == nil && isNew {
-							summary.NewEndpoints = append(summary.NewEndpoints, epDB)
+			// Mutex to protect summary fields and DB writes inside the worker
+			var gauMut sync.Mutex
+
+			for w := 1; w <= p.workerCount; w++ {
+				gauWg.Add(1)
+				go func() {
+					defer gauWg.Done()
+					for targetURL := range gauJobs {
+						if ctx.Err() != nil {
+							return
+						}
+						
+						// Naive extraction: https://sub.domain.com:443 -> sub.domain.com
+						hostPart := strings.TrimPrefix(targetURL, "http://")
+						hostPart = strings.TrimPrefix(hostPart, "https://")
+						if idx := strings.Index(hostPart, ":"); idx != -1 {
+							hostPart = hostPart[:idx]
+						}
+						
+						subID, exists := subdomainIDMap[hostPart]
+						if !exists {
+							continue
+						}
+
+						urls, err := p.endpointScraper.Run(ctx, targetURL)
+						if err == nil {
+							gauMut.Lock()
+							summary.TotalEndpoints += len(urls)
+							for _, u := range urls {
+								epDB, isNew, err := p.storage.AddEndpoint(subID, u)
+								if err == nil && isNew {
+									summary.NewEndpoints = append(summary.NewEndpoints, epDB)
+								}
+							}
+							gauMut.Unlock()
 						}
 					}
-				}
+				}()
 			}
+
+			// Feed gau jobs
+			for _, targetURL := range liveWebServices {
+				gauJobs <- targetURL
+			}
+			close(gauJobs)
+
+			// Spinner for gau
+			spinCtxGau, stopGauSpinner := context.WithCancel(context.Background())
+			go func() {
+				chars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+				i := 0
+				for {
+					select {
+					case <-spinCtxGau.Done():
+						fmt.Print("\r\033[K")
+						return
+					default:
+						fmt.Printf("\r    %s Scraping endpoints...", chars[i])
+						i = (i + 1) % len(chars)
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+			}()
+
+			gauWg.Wait()
+			stopGauSpinner()
+
+			p.storage.UpdateScanStatus(target, "gau", "completed")
+			fmt.Printf("    [+] gau scraping completed\n")
+		}
+
+		// 5. Vulnerability Scanning (nuclei)
+		if p.nucleiScanner != nil && len(liveWebServices) > 0 {
+			p.storage.UpdateScanStatus(target, "nuclei", "running")
+			
+			// Nuclei Spinner
+			spinCtx3, stopSpinner3 := context.WithCancel(context.Background())
+			go func() {
+				chars := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+				i := 0
+				for {
+					select {
+					case <-spinCtx3.Done():
+						fmt.Print("\r\033[K")
+						return
+					default:
+						fmt.Printf("\r    %s Scanning %d live services with nuclei...", chars[i], len(liveWebServices))
+						i = (i + 1) % len(chars)
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+			}()
+
+			nucleiResults, err := p.nucleiScanner.Run(ctx, liveWebServices)
+			stopSpinner3() // Stop spinner before printing next line
+			
+			if err == nil {
+				for _, vuln := range nucleiResults {
+					// Find portID
+					// matchedAt is like https://sub.domain.com:443/login.php
+					// portIDMap keys are like https://sub.domain.com:443
+					
+					var portID int64
+					found := false
+					
+					// Prefix matching to handle sub-paths
+					for url, pid := range portIDMap {
+						if strings.HasPrefix(vuln.MatchedAt, url) {
+							portID = pid
+							found = true
+							break
+						}
+					}
+
+					if !found {
+						continue 
+					}
+					
+					_, _, err := p.storage.AddVulnerability(portID, vuln.TemplateID, vuln.Info.Name, vuln.Info.Severity, vuln.MatchedAt)
+					if err != nil {
+						log.Printf("[!] Error saving vulnerability %s: %v\n", vuln.TemplateID, err)
+					} else {
+						summary.TotalVulnerabilities++
+					}
+				}
+				p.storage.UpdateScanStatus(target, "nuclei", "completed")
+			} else {
+				p.storage.UpdateScanStatus(target, "nuclei", "failed")
+			}
+			fmt.Printf("    [+] nuclei scanning completed (%d findings)\n", summary.TotalVulnerabilities)
 		}
 
 	}

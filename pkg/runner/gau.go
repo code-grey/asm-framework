@@ -1,7 +1,7 @@
 package runner
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"os/exec"
 	"strings"
@@ -20,27 +20,31 @@ func (g *Gau) Name() string {
 }
 
 func (g *Gau) Run(ctx context.Context, target string) ([]string, error) {
-	// Create a sub-context with a 3-minute timeout to prevent hanging on slow archive APIs
 	timeoutCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 
 	cmd := exec.CommandContext(timeoutCtx, "gau", target, "--threads", "5")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdin = nil
 	
-	var out bytes.Buffer
-	cmd.Stdout = &out
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
 
-	_ = cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
 
 	var urls []string
-	lines := strings.Split(out.String(), "\n")
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		trimmed := strings.TrimSpace(scanner.Text())
 		if trimmed != "" {
 			urls = append(urls, trimmed)
 		}
 	}
+
+	_ = cmd.Wait()
 
 	return urls, nil
 }

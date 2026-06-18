@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"asm-framework/pkg/orchestrator"
@@ -24,6 +25,15 @@ func main() {
 	runTui := flag.Bool("tui", false, "Launch the interactive TUI viewer for the database")
 	deepMode := flag.Bool("deep", false, "Run in deep mode (Amass active, Subfinder all sources, Nmap full ports + versioning)")
 	flag.Parse()
+
+	// Sanitize domain input
+	if *domain != "" {
+		cleaned := strings.TrimSpace(*domain)
+		cleaned = strings.TrimPrefix(cleaned, "http://")
+		cleaned = strings.TrimPrefix(cleaned, "https://")
+		cleaned = strings.TrimRight(cleaned, "/")
+		*domain = cleaned
+	}
 
 	// Handle TUI mode (no domain required)
 	if *runTui {
@@ -83,6 +93,8 @@ func main() {
 	pipeline.AddPortScanner(runner.NewNmap())
 	pipeline.SetWebProber(runner.NewHttpx())
 	pipeline.SetEndpointScraper(runner.NewGau())
+	pipeline.SetNucleiScanner(runner.NewNuclei())
+	pipeline.SetExploitScanner(runner.NewExploitDB())
 
 	if !*jsonOut {
 		fmt.Printf("========================================\n")
@@ -120,8 +132,9 @@ func main() {
 				fmt.Printf("  + %s:%d [%s]\n", port.Target, port.Number, port.Service)
 			}
 		}
+		fmt.Printf("\nTotal Vulnerabilities Found: %d\n", summary.TotalVulnerabilities)
 		fmt.Printf("=========================================\n")
-		
+
 		if err == context.Canceled {
 			fmt.Println("\nRun partially completed due to cancellation. Database updated with gathered data.")
 		} else {
