@@ -14,3 +14,4 @@ vendor/
 .idea/
 .vscode/
 .DS_Store
+asm.db*
