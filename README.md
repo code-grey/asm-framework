@@ -7,7 +7,7 @@ A modular, orchestration-driven framework written in Go for automated attack sur
 The framework operates sequentially through a funnel-based architecture, progressively narrowing targets to ensure speed and accuracy:
 
 1.  **Subdomain Enumeration**: Discovers potential targets using `subfinder` and `amass`.
-2.  **DNS Resolution**: Filters out dead or parked domains using `puredns` to preserve downstream scan time.
+2.  **DNS Resolution**: Filters out dead or parked domains using a pure-Go concurrent DNS resolver to preserve downstream scan time.
 3.  **Port Scanning**: Identifies open ports and services on live targets using `nmap`.
 4.  **Web Context Probing**: Connects to open web ports using `httpx` to extract page titles, HTTP status codes, and underlying technology stacks.
 5.  **Endpoint Discovery**: Scrapes historical and hidden URLs from live websites using `gau`.
@@ -39,7 +39,7 @@ The framework is an orchestrator; it relies on external security tools. We provi
    cd asm-framework
    ```
 
-2. Run the automated setup script to install all dependencies (`nmap`, `amass`, `subfinder`, `httpx`, `gau`, `nuclei`, `puredns`, `exploitdb`, `massdns`):
+2. Run the automated setup script to install all dependencies (`nmap`, `amass`, `subfinder`, `httpx`, `gau`, `nuclei`, `exploitdb`):
    ```bash
    chmod +x setup.sh
    ./setup.sh

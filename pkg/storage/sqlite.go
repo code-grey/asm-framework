@@ -32,6 +32,7 @@ func (s *SQLiteStorage) Init() error {
 	CREATE TABLE IF NOT EXISTS subdomains (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		domain TEXT UNIQUE NOT NULL,
+		is_alive INTEGER NOT NULL DEFAULT 1,
 		discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -95,6 +96,7 @@ func (s *SQLiteStorage) Init() error {
 
 	// Graceful migration for existing databases
 	_, _ = s.db.Exec("ALTER TABLE ports ADD COLUMN version TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE subdomains ADD COLUMN is_alive INTEGER NOT NULL DEFAULT 1")
 
 	return nil
 }
@@ -107,7 +109,7 @@ func (s *SQLiteStorage) AddSubdomain(domain string) (Subdomain, bool, error) {
 	var sub Subdomain
 	var isNew bool
 
-	// Upsert query
+	// Upsert query — new subdomains default to is_alive=1 (optimistic)
 	_, err := s.db.Exec(`
 		INSERT INTO subdomains (domain, discovered_at) VALUES (?, ?)
 		ON CONFLICT(domain) DO NOTHING
@@ -117,8 +119,8 @@ func (s *SQLiteStorage) AddSubdomain(domain string) (Subdomain, bool, error) {
 		return sub, false, err
 	}
 
-	err = s.db.QueryRow("SELECT id, domain, discovered_at FROM subdomains WHERE domain = ?", domain).
-		Scan(&sub.ID, &sub.Domain, &sub.DiscoveredAt)
+	err = s.db.QueryRow("SELECT id, domain, is_alive, discovered_at FROM subdomains WHERE domain = ?", domain).
+		Scan(&sub.ID, &sub.Domain, &sub.IsAlive, &sub.DiscoveredAt)
 		
 	// If the discovered_at time is very close to now, it's newly inserted
 	if time.Since(sub.DiscoveredAt) < time.Second {
@@ -126,6 +128,40 @@ func (s *SQLiteStorage) AddSubdomain(domain string) (Subdomain, bool, error) {
 	}
 
 	return sub, isNew, err
+}
+
+func (s *SQLiteStorage) UpdateSubdomainAliveStatus(alive []string, dead []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmtAlive, err := tx.Prepare("UPDATE subdomains SET is_alive = 1 WHERE domain = ?")
+	if err != nil {
+		return err
+	}
+	defer stmtAlive.Close()
+
+	for _, d := range alive {
+		if _, err := stmtAlive.Exec(d); err != nil {
+			return err
+		}
+	}
+
+	stmtDead, err := tx.Prepare("UPDATE subdomains SET is_alive = 0 WHERE domain = ?")
+	if err != nil {
+		return err
+	}
+	defer stmtDead.Close()
+
+	for _, d := range dead {
+		if _, err := stmtDead.Exec(d); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (s *SQLiteStorage) AddPort(subdomainID int64, number int, service, version, state string) (Port, bool, error) {
@@ -236,7 +272,7 @@ func (s *SQLiteStorage) AddVulnerability(portID int64, templateID, name, severit
 }
 
 func (s *SQLiteStorage) GetSubdomains() ([]Subdomain, error) {
-	rows, err := s.db.Query("SELECT id, domain, discovered_at FROM subdomains")
+	rows, err := s.db.Query("SELECT id, domain, is_alive, discovered_at FROM subdomains")
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +281,7 @@ func (s *SQLiteStorage) GetSubdomains() ([]Subdomain, error) {
 	var subdomains []Subdomain
 	for rows.Next() {
 		var sub Subdomain
-		if err := rows.Scan(&sub.ID, &sub.Domain, &sub.DiscoveredAt); err != nil {
+		if err := rows.Scan(&sub.ID, &sub.Domain, &sub.IsAlive, &sub.DiscoveredAt); err != nil {
 			return nil, err
 		}
 		subdomains = append(subdomains, sub)

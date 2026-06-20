@@ -38,25 +38,10 @@ go install github.com/lc/gau/v2/cmd/gau@latest
 echo "[*] Installing Nuclei..."
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 
-echo "[*] Installing Puredns..."
-go install github.com/d3mondev/puredns/v2@latest
 
 echo "[*] Installing Dalfox (for future fuzzing mode)..."
 go install github.com/hahwul/dalfox/v2@latest
 
-# 4. Install massdns (Required by Puredns)
-if ! command -v massdns &> /dev/null
-then
-    echo "[*] Installing massdns..."
-    git clone https://github.com/blechschmidt/massdns.git /tmp/massdns
-    cd /tmp/massdns
-    make
-    sudo mv bin/massdns /usr/local/bin/
-    cd -
-    rm -rf /tmp/massdns
-else
-    echo "[*] massdns is already installed."
-fi
 
 # 5. Symlink Go binaries to /usr/local/bin for global access (requires sudo)
 echo "[*] Symlinking Go binaries to /usr/local/bin..."

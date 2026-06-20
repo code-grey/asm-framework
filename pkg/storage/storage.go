@@ -6,6 +6,7 @@ import "time"
 type Subdomain struct {
 	ID           int64     `json:"id"`
 	Domain       string    `json:"domain"`
+	IsAlive      bool      `json:"is_alive"`
 	DiscoveredAt time.Time `json:"discovered_at"`
 }
 
@@ -65,6 +66,7 @@ type Storage interface {
 	Init() error
 	Close() error
 	AddSubdomain(domain string) (Subdomain, bool, error) // Returns Subdomain, isNew, error
+	UpdateSubdomainAliveStatus(alive []string, dead []string) error
 	AddPort(subdomainID int64, number int, service, version, state string) (Port, bool, error)
 	AddWebService(portID int64, url, title string, statusCode int, techStack string) (WebService, bool, error)
 	AddEndpoint(subdomainID int64, url string) (Endpoint, bool, error)

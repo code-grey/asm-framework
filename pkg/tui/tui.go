@@ -11,77 +11,124 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// RunTUI launches the interactive database viewer
+// subEntry holds a subdomain and its pre-built display label.
+// Built once at startup per domain bucket; never rebuilt during navigation.
+type subEntry struct {
+	sub   storage.Subdomain
+	label string // plain domain name, no markup
+}
+
+// RunTUI launches the interactive database viewer.
 func RunTUI(store storage.Storage) error {
 	app := tview.NewApplication()
 
-	// Load all subdomains from DB
+	// Load all subdomains from DB once at startup.
 	subdomains, err := store.GetSubdomains()
 	if err != nil {
 		return err
 	}
 
-	// Group subdomains by Root Domain
-	domainMap := make(map[string][]storage.Subdomain)
+	// Group into per-root buckets. Within each bucket, live subdomains come
+	// first (sorted A-Z), followed by dead ones (sorted A-Z).
+	// All sorting happens here — never again during navigation.
+	type domainBucket struct {
+		entries []subEntry // live first, then dead
+		live    int        // count of live entries (for title display)
+		dead    int
+	}
+	domainMap := make(map[string]*domainBucket)
+
 	for _, sub := range subdomains {
 		root, err := publicsuffix.EffectiveTLDPlusOne(sub.Domain)
 		if err != nil {
-			root = sub.Domain // Fallback
+			root = sub.Domain
 		}
-		domainMap[root] = append(domainMap[root], sub)
+		if domainMap[root] == nil {
+			domainMap[root] = &domainBucket{}
+		}
+		b := domainMap[root]
+		e := subEntry{sub: sub, label: sub.Domain}
+		if sub.IsAlive {
+			b.live++
+		} else {
+			b.dead++
+		}
+		b.entries = append(b.entries, e)
 	}
 
-	// Extract and sort root domains
+	for _, b := range domainMap {
+		sort.Slice(b.entries, func(i, j int) bool {
+			// live before dead; tie-break alphabetically
+			if b.entries[i].sub.IsAlive != b.entries[j].sub.IsAlive {
+				return b.entries[i].sub.IsAlive
+			}
+			return b.entries[i].label < b.entries[j].label
+		})
+	}
+
 	var rootDomains []string
 	for root := range domainMap {
 		rootDomains = append(rootDomains, root)
 	}
 	sort.Strings(rootDomains)
 
-	// Layout Elements
-	flex := tview.NewFlex().SetDirection(tview.FlexColumn)
+	// ── Widgets ───────────────────────────────────────────────────────────────
 
-	// 1. Root Domains List
 	domainList := tview.NewList().ShowSecondaryText(false)
 	domainList.SetBorder(true).SetTitle(" Target Domains ")
-	domainList.SetSelectedBackgroundColor(tcell.ColorBlue)
+	domainList.SetSelectedBackgroundColor(tcell.ColorDarkBlue)
+	domainList.SetSelectedTextColor(tcell.ColorWhite)
 
-	// 2. Subdomains List
 	subList := tview.NewList().ShowSecondaryText(false)
 	subList.SetBorder(true).SetTitle(" Subdomains ")
-	subList.SetSelectedBackgroundColor(tcell.ColorGreen)
+	subList.SetSelectedBackgroundColor(tcell.ColorDarkCyan)
+	subList.SetSelectedTextColor(tcell.ColorWhite)
 
-	// 3. Ports Table
 	portTable := tview.NewTable().SetBorders(true)
 	portTable.SetBorder(true).SetTitle(" Open Ports ")
 	portTable.SetSelectable(true, false)
 
-	// 4. Vulnerabilities Table
 	vulnTable := tview.NewTable().SetBorders(true)
 	vulnTable.SetBorder(true).SetTitle(" Vulnerabilities ")
 	vulnTable.SetSelectable(true, false)
 
-	// State trackers
-	var currentSubdomains []storage.Subdomain
-	var currentPorts []storage.Port
+	detailsPane := tview.NewTextView().
+		SetWrap(true).
+		SetWordWrap(true).
+		SetDynamicColors(true).
+		SetTextColor(tcell.ColorWhite)
+	detailsPane.SetBorder(true).SetTitle(" Details ")
 
-	// Update Subdomains based on selected Root Domain
-	updateSubdomains := func(rootDomain string) {
+	// ── State ─────────────────────────────────────────────────────────────────
+	var currentEntries []subEntry
+	var currentPorts []storage.Port
+	var currentVulns []storage.Vulnerability
+
+	// ── Helpers ───────────────────────────────────────────────────────────────
+
+	// populateSubList is called only when the selected root domain changes.
+	// It rebuilds the subList widget from the pre-sorted bucket entries.
+	populateSubList := func(b *domainBucket) {
 		subList.Clear()
 		portTable.Clear()
 		vulnTable.Clear()
-		
-		currentSubdomains = domainMap[rootDomain]
-		sort.Slice(currentSubdomains, func(i, j int) bool {
-			return currentSubdomains[i].Domain < currentSubdomains[j].Domain
-		})
+		detailsPane.Clear()
 
-		for _, sub := range currentSubdomains {
-			subList.AddItem(sub.Domain, "", 0, nil)
+		currentEntries = b.entries
+
+		for _, e := range currentEntries {
+			var label string
+			if e.sub.IsAlive {
+				label = "[#00ff7f]● " + e.label + "[-]"
+			} else {
+				label = "[#ff5555]✗ " + e.label + "[-]"
+			}
+			subList.AddItem(label, "", 0, nil)
 		}
+
+		subList.SetTitle(fmt.Sprintf(" Subdomains [%d live · %d dead] ", b.live, b.dead))
 	}
 
-	// Update Ports based on selected Subdomain
 	updatePorts := func(index int) {
 		portTable.Clear()
 		vulnTable.Clear()
@@ -91,12 +138,11 @@ func RunTUI(store storage.Storage) error {
 		portTable.SetCell(0, 2, tview.NewTableCell("Version").SetTextColor(tcell.ColorYellow).SetSelectable(false))
 		portTable.SetCell(0, 3, tview.NewTableCell("State").SetTextColor(tcell.ColorYellow).SetSelectable(false))
 
-		if len(currentSubdomains) == 0 || index < 0 || index >= len(currentSubdomains) {
+		if len(currentEntries) == 0 || index < 0 || index >= len(currentEntries) {
 			return
 		}
 
-		selectedSub := currentSubdomains[index]
-		ports, err := store.GetPorts(selectedSub.ID)
+		ports, err := store.GetPorts(currentEntries[index].sub.ID)
 		if err != nil {
 			return
 		}
@@ -111,7 +157,6 @@ func RunTUI(store storage.Storage) error {
 		}
 	}
 
-	// Update Vulnerabilities based on selected Port
 	updateVulnerabilities := func(portIndex int) {
 		vulnTable.Clear()
 		vulnTable.SetCell(0, 0, tview.NewTableCell("ID").SetTextColor(tcell.ColorYellow).SetSelectable(false))
@@ -122,37 +167,47 @@ func RunTUI(store storage.Storage) error {
 			return
 		}
 
-		selectedPort := currentPorts[portIndex]
-		vulns, err := store.GetVulnerabilities(selectedPort.ID)
+		vulns, err := store.GetVulnerabilities(currentPorts[portIndex].ID)
 		if err != nil {
 			return
 		}
+		currentVulns = vulns
 
 		for i, v := range vulns {
 			row := i + 1
-			vulnTable.SetCell(row, 0, tview.NewTableCell(v.TemplateID).SetTextColor(tcell.ColorWhite))
 			color := tcell.ColorRed
-			if v.Severity == "low" { color = tcell.ColorGreen }
-			if v.Severity == "medium" { color = tcell.ColorYellow }
+			if v.Severity == "low" {
+				color = tcell.ColorGreen
+			} else if v.Severity == "medium" {
+				color = tcell.ColorYellow
+			}
+			vulnTable.SetCell(row, 0, tview.NewTableCell(v.TemplateID).SetTextColor(tcell.ColorWhite))
 			vulnTable.SetCell(row, 1, tview.NewTableCell(v.Severity).SetTextColor(color))
 			vulnTable.SetCell(row, 2, tview.NewTableCell(v.Name).SetTextColor(tcell.ColorWhite))
 		}
 	}
 
-	// Navigation: Domain List
+	// ── Navigation ────────────────────────────────────────────────────────────
+
 	for _, rd := range rootDomains {
 		domainList.AddItem(rd, "", 0, nil)
 	}
 
-	domainList.SetChangedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
-		updateSubdomains(mainText)
-		if len(currentSubdomains) > 0 {
-			updatePorts(0)
-			updateVulnerabilities(0)
+	domainList.SetChangedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
+		if b := domainMap[mainText]; b != nil {
+			populateSubList(b)
+			if len(currentEntries) > 0 {
+				updatePorts(0)
+				updateVulnerabilities(0)
+			}
 		}
 	})
 
 	domainList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Rune() == 'q' || event.Key() == tcell.KeyCtrlC {
+			app.Stop()
+			return nil
+		}
 		if event.Key() == tcell.KeyRight || event.Key() == tcell.KeyEnter {
 			if subList.GetItemCount() > 0 {
 				app.SetFocus(subList)
@@ -162,13 +217,16 @@ func RunTUI(store storage.Storage) error {
 		return event
 	})
 
-	// Navigation: Subdomain List
-	subList.SetChangedFunc(func(index int, mainText string, secondaryText string, shortcut rune) {
+	subList.SetChangedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
 		updatePorts(index)
 		updateVulnerabilities(0)
 	})
 
 	subList.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Rune() == 'q' || event.Key() == tcell.KeyCtrlC {
+			app.Stop()
+			return nil
+		}
 		if event.Key() == tcell.KeyLeft || event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyBackspace || event.Key() == tcell.KeyBackspace2 {
 			app.SetFocus(domainList)
 			return nil
@@ -182,48 +240,90 @@ func RunTUI(store storage.Storage) error {
 		return event
 	})
 
-	// Navigation: Port Table
 	portTable.SetSelectionChangedFunc(func(row, column int) {
 		updateVulnerabilities(row - 1)
+		if row > 0 && row-1 < len(currentPorts) {
+			p := currentPorts[row-1]
+			detailsPane.SetText(fmt.Sprintf("[yellow]Port:[white] %d\n[yellow]Service:[white] %s\n[yellow]Version:[teal] %s\n[yellow]State:[green] %s", p.Number, p.Service, p.Version, p.State))
+		} else {
+			detailsPane.Clear()
+		}
+	})
+
+	vulnTable.SetSelectionChangedFunc(func(row, column int) {
+		if row > 0 && row-1 < len(currentVulns) {
+			v := currentVulns[row-1]
+			detailsPane.SetText(fmt.Sprintf("[yellow]Vulnerability:[white] %s\n[yellow]Severity:[white] %s\n[yellow]ID/Template:[white] %s", v.Name, v.Severity, v.TemplateID))
+		} else {
+			detailsPane.Clear()
+		}
 	})
 
 	portTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Rune() == 'q' || event.Key() == tcell.KeyCtrlC {
+			app.Stop()
+			return nil
+		}
 		if event.Key() == tcell.KeyLeft || event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyBackspace || event.Key() == tcell.KeyBackspace2 {
 			app.SetFocus(subList)
 			return nil
 		}
 		if event.Key() == tcell.KeyRight || event.Key() == tcell.KeyEnter {
-			app.SetFocus(vulnTable)
-			return nil
-		}
-		return event
-	})
-	
-	// Navigation: Vulnerabilities Table
-	vulnTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Key() == tcell.KeyLeft || event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyBackspace || event.Key() == tcell.KeyBackspace2 {
-			app.SetFocus(portTable)
+			if vulnTable.GetRowCount() > 1 {
+				app.SetFocus(vulnTable)
+				row, _ := vulnTable.GetSelection()
+				if row > 0 && row-1 < len(currentVulns) {
+					v := currentVulns[row-1]
+					detailsPane.SetText(fmt.Sprintf("[yellow]Vulnerability:[white] %s\n[yellow]Severity:[white] %s\n[yellow]ID/Template:[white] %s", v.Name, v.Severity, v.TemplateID))
+				}
+			}
 			return nil
 		}
 		return event
 	})
 
-	// Initialize first view
+	vulnTable.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Rune() == 'q' || event.Key() == tcell.KeyCtrlC {
+			app.Stop()
+			return nil
+		}
+		if event.Key() == tcell.KeyLeft || event.Key() == tcell.KeyEscape || event.Key() == tcell.KeyBackspace || event.Key() == tcell.KeyBackspace2 {
+			app.SetFocus(portTable)
+			row, _ := portTable.GetSelection()
+			if row > 0 && row-1 < len(currentPorts) {
+				p := currentPorts[row-1]
+				detailsPane.SetText(fmt.Sprintf("[yellow]Port:[white] %d\n[yellow]Service:[white] %s\n[yellow]Version:[teal] %s\n[yellow]State:[green] %s", p.Number, p.Service, p.Version, p.State))
+			} else {
+				detailsPane.Clear()
+			}
+			return nil
+		}
+		return event
+	})
+
+	// ── Initialise ────────────────────────────────────────────────────────────
 	if len(rootDomains) > 0 {
-		updateSubdomains(rootDomains[0])
-		if len(currentSubdomains) > 0 {
-			updatePorts(0)
-			updateVulnerabilities(0)
+		if b := domainMap[rootDomains[0]]; b != nil {
+			populateSubList(b)
+			if len(currentEntries) > 0 {
+				updatePorts(0)
+				updateVulnerabilities(0)
+			}
 		}
 	}
 
-	// Layout Setup
-	flex.AddItem(domainList, 0, 1, true).
+	// ── Layout ────────────────────────────────────────────────────────────────
+	topFlex := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(domainList, 0, 1, true).
 		AddItem(subList, 0, 2, false).
 		AddItem(portTable, 0, 2, false).
 		AddItem(vulnTable, 0, 2, false)
 
-	// Global Application Input Capture (Fixes the freeze/exit issue)
+	mainFlex := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(topFlex, 0, 3, true).
+		AddItem(detailsPane, 0, 1, false)
+
+	// Global fallback for quit.
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyCtrlC || event.Rune() == 'q' {
 			app.Stop()
@@ -232,10 +332,9 @@ func RunTUI(store storage.Storage) error {
 		return event
 	})
 
-	// Info Frame
-	frame := tview.NewFrame(flex).
+	frame := tview.NewFrame(mainFlex).
 		AddText("ASM Database Viewer", true, tview.AlignCenter, tcell.ColorWhite).
-		AddText("q / Ctrl+C: Quit | ↑/↓: Navigate | Enter/→: Step In | ←/ESC: Step Back", false, tview.AlignCenter, tcell.ColorGray)
+		AddText("q/Ctrl+C: Quit | ↑/↓: Navigate | Enter/→: Step In | ←/ESC: Step Back", false, tview.AlignCenter, tcell.ColorGray)
 
 	if err := app.SetRoot(frame, true).EnableMouse(true).Run(); err != nil {
 		return err

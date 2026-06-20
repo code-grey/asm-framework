@@ -118,6 +118,10 @@ func main() {
 	} else {
 		fmt.Printf("\n================ SUMMARY ================\n")
 		fmt.Printf("Total Subdomains Discovered: %d\n", summary.TotalSubdomains)
+		if summary.LiveSubdomains > 0 || summary.DeadSubdomains > 0 {
+			fmt.Printf("  Live (DNS Resolved):      %d\n", summary.LiveSubdomains)
+			fmt.Printf("  Dead (NXDOMAIN):          %d\n", summary.DeadSubdomains)
+		}
 		fmt.Printf("New Subdomains Added:        %d\n", len(summary.NewSubdomains))
 		if len(summary.NewSubdomains) > 0 {
 			for _, sub := range summary.NewSubdomains {

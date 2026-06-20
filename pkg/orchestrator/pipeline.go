@@ -16,6 +16,8 @@ type ResultSummary struct {
 	Target            string
 	TotalSubdomains   int
 	NewSubdomains     []string
+	DeadSubdomains    int
+	LiveSubdomains    int
 	TotalPorts        int
 	NewPorts          []runner.PortResult
 	TotalWebServices  int
@@ -169,29 +171,10 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 		rawSubs = append(rawSubs, sub)
 	}
 
-	targetsToScan := make([]string, 0, len(uniqueSubs))
+	// 1. Insert ALL discovered subdomains into the database BEFORE filtering.
+	// This ensures even dead subdomains are tracked for takeover detection and temporal analysis.
 	subdomainIDMap := make(map[string]int64)
-
-	// DNS Resolution Filtering
-	if p.dnsResolver != nil {
-		fmt.Printf("[*] Filtering dead subdomains with puredns...\n")
-		p.storage.UpdateScanStatus(target, "puredns", "running")
-		liveSubs, err := p.dnsResolver.Run(ctx, rawSubs)
-		if err != nil {
-			log.Printf("[!] Error running puredns: %v\n", err)
-			p.storage.UpdateScanStatus(target, "puredns", "failed")
-			// fallback to all if dns fails
-			targetsToScan = rawSubs
-		} else {
-			p.storage.UpdateScanStatus(target, "puredns", "completed")
-			targetsToScan = liveSubs
-			fmt.Printf("    [+] puredns filtered down to %d live subdomains\n", len(targetsToScan))
-		}
-	} else {
-		targetsToScan = rawSubs
-	}
-
-	for _, sub := range targetsToScan {
+	for _, sub := range rawSubs {
 		subDB, isNew, err := p.storage.AddSubdomain(sub)
 		if err != nil {
 			log.Printf("[!] Error saving subdomain %s: %v\n", sub, err)
@@ -201,6 +184,49 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 		if isNew {
 			summary.NewSubdomains = append(summary.NewSubdomains, sub)
 		}
+	}
+
+	// 2. DNS Resolution Filtering — update alive/dead status in the database.
+	// Only live subdomains proceed to port scanning; dead ones stay in the DB with is_alive=false.
+	targetsToScan := make([]string, 0, len(uniqueSubs))
+
+	if p.dnsResolver != nil {
+		fmt.Printf("[*] Filtering dead subdomains with puredns...\n")
+		p.storage.UpdateScanStatus(target, "puredns", "running")
+		liveSubs, err := p.dnsResolver.Run(ctx, rawSubs)
+		if err != nil {
+			log.Printf("[!] Error running puredns: %v\n", err)
+			p.storage.UpdateScanStatus(target, "puredns", "failed")
+			// fallback to all if dns fails — mark everything alive
+			targetsToScan = rawSubs
+		} else {
+			p.storage.UpdateScanStatus(target, "puredns", "completed")
+			targetsToScan = liveSubs
+
+			// Compute the dead set (rawSubs minus liveSubs)
+			liveSet := make(map[string]bool, len(liveSubs))
+			for _, s := range liveSubs {
+				liveSet[s] = true
+			}
+			var deadSubs []string
+			for _, s := range rawSubs {
+				if !liveSet[s] {
+					deadSubs = append(deadSubs, s)
+				}
+			}
+
+			// Batch update alive/dead status in the database
+			if err := p.storage.UpdateSubdomainAliveStatus(liveSubs, deadSubs); err != nil {
+				log.Printf("[!] Error updating subdomain alive status: %v\n", err)
+			}
+
+			summary.DeadSubdomains = len(deadSubs)
+			summary.LiveSubdomains = len(liveSubs)
+			fmt.Printf("    [+] puredns: %d live, %d dead subdomains\n", len(liveSubs), len(deadSubs))
+		}
+	} else {
+		targetsToScan = rawSubs
+		summary.LiveSubdomains = len(rawSubs)
 	}
 
 	if len(p.portScanners) > 0 && len(targetsToScan) > 0 {
