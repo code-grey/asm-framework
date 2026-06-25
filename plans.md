@@ -9,13 +9,13 @@
 - [x] Deep Mode (`-deep`): Service version extraction and active DNS scanning.
 - [x] Terminal UI (`-tui`): 3-pane interactive database viewer.
 
-## Phase 2: Pipeline Expansion & Context (⏳ Up Next)
-- [ ] **DNS Resolution (`puredns`)**:
+## Phase 2: Pipeline Expansion & Context (✅ Completed)
+- [x] **DNS Resolution (`puredns`)**:
   - Filter out dead subdomains before they reach Nmap to massively speed up the pipeline.
-- [ ] **Web Probing & Tech Fingerprinting (`httpx`)**:
+- [x] **Web Probing & Tech Fingerprinting (`httpx`)**:
   - Scan open ports to extract Web Page Titles, HTTP Status Codes, and Tech Stacks.
   - Update SQLite schema to store web context.
-- [ ] **Endpoint Discovery (`gau`)**:
+- [x] **Endpoint Discovery (`gau`)**:
   - Extract historical and hidden URLs for discovered live websites.
 
 ## Phase 3: Vulnerability & Reporting (✅ Completed)
@@ -27,8 +27,8 @@
 - [x] **Scan Progress Tracking**:
   - Added persistence for tool execution status (running/completed/failed).
   - Updated TUI with a live-ish "Scan Progress" pane.
-- [ ] **Report Generator**:
-  - Build a module to query the database and export a comprehensive report (PDF/Markdown/HTML) detailing assets, versions, and discovered vulnerabilities.
+- [x] **Report Generator**:
+  - Build a module to query the database and export a comprehensive report (JSON/HTML) detailing assets, versions, and discovered vulnerabilities.
 
 ## Phase 5: Active Fuzzing & DAST (Future)
 - [ ] **Proxy & Anonymization Routing**:
