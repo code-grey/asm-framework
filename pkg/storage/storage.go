@@ -47,6 +47,8 @@ type Vulnerability struct {
 	TemplateID   string    `json:"template_id"`
 	Name         string    `json:"name"`
 	Severity     string    `json:"severity"`
+	CVE          string    `json:"cve"`
+	CVSS         float64   `json:"cvss"`
 	MatchedAt    string    `json:"matched_at"`
 	DiscoveredAt time.Time `json:"discovered_at"`
 }
@@ -70,7 +72,7 @@ type Storage interface {
 	AddPort(subdomainID int64, number int, service, version, state string) (Port, bool, error)
 	AddWebService(portID int64, url, title string, statusCode int, techStack string) (WebService, bool, error)
 	AddEndpoint(subdomainID int64, url string) (Endpoint, bool, error)
-	AddVulnerability(portID int64, templateID, name, severity, matchedAt string) (Vulnerability, bool, error)
+	AddVulnerability(portID int64, templateID, name, severity, cve string, cvss float64, matchedAt string) (Vulnerability, bool, error)
 	GetSubdomains() ([]Subdomain, error)
 	GetPorts(subdomainID int64) ([]Port, error)
 	GetWebServices(portID int64) ([]WebService, error)

@@ -18,3 +18,4 @@ asm.db*
 
 # Internal documentation
 internal-docs/
+internal-docs/reports/*

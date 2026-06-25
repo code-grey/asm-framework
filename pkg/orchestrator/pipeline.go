@@ -1,9 +1,10 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"context"
 	"fmt"
-	"log"
+	"asm-framework/pkg/logger"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ type Pipeline struct {
 	endpointScraper  *runner.Gau
 	nucleiScanner    *runner.Nuclei
 	exploitScanner   *runner.ExploitDB
+	nvdRunner        *runner.NVD
 	workerCount      int
 }
 
@@ -56,6 +58,10 @@ func (p *Pipeline) SetDNSResolver(r *runner.Puredns) {
 
 func (p *Pipeline) AddPortScanner(r runner.PortScanner) {
 	p.portScanners = append(p.portScanners, r)
+}
+
+func (p *Pipeline) SetNVDRunner(r *runner.NVD) {
+	p.nvdRunner = r
 }
 
 func (p *Pipeline) SetWebProber(r *runner.Httpx) {
@@ -104,7 +110,7 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 			fmt.Printf("    - Running %s...\n", runner.Name())
 			subs, err := runner.Run(ctx, target, deep)
 			if err != nil {
-				log.Printf("    [!] Error running %s: %v\n", runner.Name(), err)
+				logger.Errorf("    [!] Error running %s: %v\n", runner.Name(), err)
 				p.storage.UpdateScanStatus(target, runner.Name(), "failed")
 				return
 			}
@@ -177,7 +183,7 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 	for _, sub := range rawSubs {
 		subDB, isNew, err := p.storage.AddSubdomain(sub)
 		if err != nil {
-			log.Printf("[!] Error saving subdomain %s: %v\n", sub, err)
+			logger.Errorf("[!] Error saving subdomain %s: %v\n", sub, err)
 			continue
 		}
 		subdomainIDMap[sub] = subDB.ID
@@ -195,7 +201,7 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 		p.storage.UpdateScanStatus(target, "puredns", "running")
 		liveSubs, err := p.dnsResolver.Run(ctx, rawSubs)
 		if err != nil {
-			log.Printf("[!] Error running puredns: %v\n", err)
+			logger.Errorf("[!] Error running puredns: %v\n", err)
 			p.storage.UpdateScanStatus(target, "puredns", "failed")
 			// fallback to all if dns fails — mark everything alive
 			targetsToScan = rawSubs
@@ -217,7 +223,7 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 
 			// Batch update alive/dead status in the database
 			if err := p.storage.UpdateSubdomainAliveStatus(liveSubs, deadSubs); err != nil {
-				log.Printf("[!] Error updating subdomain alive status: %v\n", err)
+				logger.Errorf("[!] Error updating subdomain alive status: %v\n", err)
 			}
 
 			summary.DeadSubdomains = len(deadSubs)
@@ -256,8 +262,8 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 						res, err := scanner.Run(ctx, []string{t}, deep)
 						if err != nil {
 							if ctx.Err() == nil {
-								// log.Printf overwrites spinner line, but for CLI it's acceptable error output
-								log.Printf("\r    [!] Worker %d error on %s: %v\n", workerID, t, err)
+								// logger.Errorf overwrites spinner line, but for CLI it's acceptable error output
+								logger.Errorf("\r    [!] Worker %d error on %s: %v\n", workerID, t, err)
 							}
 							continue
 						}
@@ -348,7 +354,7 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 			
 			portDB, isNew, err := p.storage.AddPort(subID, res.Number, res.Service, res.Version, res.State)
 			if err != nil {
-				log.Printf("\r[!] Error saving port %d on %s: %v\n", res.Number, res.Target, err)
+				logger.Errorf("\r[!] Error saving port %d on %s: %v\n", res.Number, res.Target, err)
 				continue
 			}
 			if isNew {
@@ -361,8 +367,31 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 				exploits, err := p.exploitScanner.Run(ctx, res.Version)
 				if err == nil && len(exploits) > 0 {
 					for _, exp := range exploits {
-						// Store exploit as a vulnerability for now
-						_, _, _ = p.storage.AddVulnerability(portDB.ID, "exploitdb", exp.Title, "high", exp.Path)
+						cve := ""
+						cvss := 0.0
+						severity := "HIGH" // Default for exploitdb
+
+						// Parse first CVE from Codes
+						if exp.Codes != "" {
+							parts := strings.Split(exp.Codes, ";")
+							for _, pCode := range parts {
+								if strings.HasPrefix(strings.ToUpper(pCode), "CVE-") {
+									cve = pCode
+									break
+								}
+							}
+						}
+
+						// Fetch CVSS if we have a CVE and NVD runner is attached
+						if cve != "" && p.nvdRunner != nil {
+							nvdRes := p.nvdRunner.FetchCVSS(cve)
+							if nvdRes.CVSS > 0 {
+								cvss = nvdRes.CVSS
+								severity = nvdRes.Severity
+							}
+						}
+
+						_, _, _ = p.storage.AddVulnerability(portDB.ID, "exploitdb", exp.Title, severity, cve, cvss, exp.Path)
 						summary.TotalVulnerabilities++
 					}
 				}
@@ -395,16 +424,25 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 						continue // fallback
 					}
 					
-					// Convert tech slice to comma string
-					techStr := ""
-					if len(ws.Tech) > 0 {
-						// Simple join, can be modified to JSON later
-						techStr = " [" + strings.Join(ws.Tech, ", ") + "]"
+					// Convert tech slice and metadata to structured JSON
+					type StructuredTech struct {
+						WebServer    string   `json:"web_server,omitempty"`
+						CDN          string   `json:"cdn,omitempty"`
+						Technologies []string `json:"technologies,omitempty"`
 					}
+					
+					techObj := StructuredTech{
+						WebServer:    ws.WebServer,
+						CDN:          ws.CDNName,
+						Technologies: ws.Tech,
+					}
+					
+					techBytes, _ := json.Marshal(techObj)
+					techStr := string(techBytes)
 
 					wsDB, isNew, err := p.storage.AddWebService(portID, ws.URL, ws.Title, ws.StatusCode, techStr)
 					if err != nil {
-						log.Printf("[!] Error saving web service %s: %v\n", ws.URL, err)
+						logger.Errorf("[!] Error saving web service %s: %v\n", ws.URL, err)
 						continue
 					}
 					if isNew {
@@ -545,9 +583,15 @@ func (p *Pipeline) Run(ctx context.Context, target string, deep bool) (*ResultSu
 						continue 
 					}
 					
-					_, _, err := p.storage.AddVulnerability(portID, vuln.TemplateID, vuln.Info.Name, vuln.Info.Severity, vuln.MatchedAt)
+					cve := ""
+					if len(vuln.Info.Classification.CVEID) > 0 {
+						cve = vuln.Info.Classification.CVEID[0]
+					}
+					cvss := vuln.Info.Classification.CVSSScore
+					
+					_, _, err := p.storage.AddVulnerability(portID, vuln.TemplateID, vuln.Info.Name, vuln.Info.Severity, cve, cvss, vuln.MatchedAt)
 					if err != nil {
-						log.Printf("[!] Error saving vulnerability %s: %v\n", vuln.TemplateID, err)
+						logger.Errorf("[!] Error saving vulnerability %s: %v\n", vuln.TemplateID, err)
 					} else {
 						summary.TotalVulnerabilities++
 					}

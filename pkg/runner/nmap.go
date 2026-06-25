@@ -27,9 +27,9 @@ func (n *Nmap) Run(ctx context.Context, targets []string, deep bool) ([]PortResu
 	// Fast vs Deep configuration
 	var args []string
 	if deep {
-		args = []string{"-T4", "-p-", "-sV", "--script", "vuln", "--open", "-oG", "-"}
+		args = []string{"-T4", "-p-", "-sV", "-Pn", "--script", "vuln", "--open", "-oG", "-"}
 	} else {
-		args = []string{"-T4", "-F", "-sV", "--open", "-oG", "-"}
+		args = []string{"-T4", "-F", "-sV", "-Pn", "--open", "-oG", "-"}
 	}
 	args = append(args, targets...)
 

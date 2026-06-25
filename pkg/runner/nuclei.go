@@ -13,8 +13,12 @@ import (
 type NucleiResult struct {
 	TemplateID string `json:"template-id"`
 	Info       struct {
-		Name     string `json:"name"`
-		Severity string `json:"severity"`
+		Name           string `json:"name"`
+		Severity       string `json:"severity"`
+		Classification struct {
+			CVEID     []string `json:"cve-id"`
+			CVSSScore float64  `json:"cvss-score"`
+		} `json:"classification"`
 	} `json:"info"`
 	MatchedAt string `json:"matched-at"`
 }

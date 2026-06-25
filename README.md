@@ -1,16 +1,27 @@
 # Attack Surface Management (ASM) Framework
 
-A modular, orchestration-driven framework written in Go for automated attack surface discovery, network mapping, and vulnerability context gathering.
+A modular, orchestration-driven framework written in Go for automated attack surface discovery, network mapping, and vulnerability intelligence. This project integrates multiple industry-standard security tools into a unified, high-performance pipeline.
 
-## Architecture
+## Project Architecture
 
-The framework operates sequentially through a funnel-based architecture, progressively narrowing targets to ensure speed and accuracy:
+The framework is built using a highly modular Go architecture (`cmd/` and `pkg/` structure) and operates sequentially through a funnel-based pipeline:
 
 1.  **Subdomain Enumeration**: Discovers potential targets using `subfinder` and `amass`.
-2.  **DNS Resolution**: Filters out dead or parked domains using a pure-Go concurrent DNS resolver to preserve downstream scan time.
+2.  **DNS Resolution**: Filters out dead or parked domains using `puredns` to preserve downstream scan time.
 3.  **Port Scanning**: Identifies open ports and services on live targets using `nmap`.
-4.  **Web Context Probing**: Connects to open web ports using `httpx` to extract page titles, HTTP status codes, and underlying technology stacks.
+4.  **Web Context Probing**: Connects to open web ports using `httpx` to extract page titles, HTTP status codes, and technology fingerprinting (Frameworks, CMS, Web Servers).
 5.  **Endpoint Discovery**: Scrapes historical and hidden URLs from live websites using `gau`.
+6.  **Vulnerability Intelligence**: 
+    - Executes high-speed vulnerability templates against live targets using `nuclei`.
+    - Maps discovered service versions to known CVEs using `searchsploit` (ExploitDB).
+
+### Code Modularity
+- **`cmd/asm/`**: The main entry point for the application.
+- **`pkg/orchestrator/`**: Manages the execution pipeline, concurrent worker pools, and context propagation.
+- **`pkg/runner/`**: Contains modular Go wrappers for all external tools (Nmap, Amass, Httpx, etc.), ensuring uniform execution.
+- **`pkg/storage/`**: Handles local persistence using SQLite, automatically managing schema migrations and data deduplication.
+- **`pkg/logger/`**: A centralized, structured logging package built on Go's native `log/slog` for clean error handling and debugging.
+- **`pkg/tui/`**: An interactive terminal user interface for exploring the database.
 
 All gathered intelligence is deduplicated in memory and permanently persisted to a local SQLite database (`asm.db`).
 
@@ -21,17 +32,9 @@ All gathered intelligence is deduplicated in memory and permanently persisted to
 *   The required external binaries (listed below) are installed and available in the system `$PATH`.
 *   You have explicit permission to scan the target domains.
 
-## Our Unique Selling Proposition (USP)
-
-In a landscape crowded with heavily funded, cloud-tethered "Agentic AI" security platforms, our framework differentiates itself through three core tenets:
-
-1.  **Air-Gapped & Local-First AI:** We integrate with local LLMs (like Ollama) rather than relying on OpenAI or cloud APIs. This ensures that highly sensitive corporate infrastructure maps and vulnerability data never leave your network, making it compliant for defense, finance, and healthcare environments.
-2.  **Frictionless Deployment:** No Kubernetes, no Docker, no heavy appliances. The framework is designed to compile into a standalone binary, allowing a security engineer to simply `scp` the tool onto an internal jump-box and execute autonomous scans instantly.
-3.  **Deterministic Execution for Autonomous Agents:** LLMs are great at reasoning but terrible at deterministic execution. We provide the lightning-fast, Go-native sensory engine (Subfinder, Naabu, Httpx) that grounds Autonomous Red Team agents in reality, giving them the structured SQLite data they need to act without hallucinating.
-
 ## Prerequisites & Installation
 
-The framework is an orchestrator; it relies on external security tools. We provide a `setup.sh` script to automate the installation of all dependencies on Kali Linux / Ubuntu systems.
+The framework relies on several external security tools. We provide a `setup.sh` script to automate the installation of all dependencies on Kali Linux / Ubuntu systems.
 
 1. Clone the repository:
    ```bash
@@ -39,7 +42,7 @@ The framework is an orchestrator; it relies on external security tools. We provi
    cd asm-framework
    ```
 
-2. Run the automated setup script to install all dependencies (`nmap`, `amass`, `subfinder`, `httpx`, `gau`, `nuclei`, `exploitdb`):
+2. Run the automated setup script to install all dependencies (`nmap`, `amass`, `subfinder`, `httpx`, `gau`, `nuclei`, `exploitdb`, `puredns`):
    ```bash
    chmod +x setup.sh
    ./setup.sh
@@ -54,26 +57,23 @@ The framework is an orchestrator; it relies on external security tools. We provi
 ## Usage
 
 ### Basic Scan (Fast)
-
-Executes passive subdomain enumeration and probes the top 100 most common ports.
+Executes passive subdomain enumeration, DNS filtration, and probes the top 100 most common ports.
 
 ```bash
 ./asm -d example.com
 ```
 
 ### Deep Scan (Thorough)
-
-Activates deep enumeration mode. Amass will perform active TLS and DNS scraping, Subfinder will use all available premium sources, and Nmap will perform a full 65,535 port sweep with Service Versioning (`-sV`) and Vulnerability Scripting (`--script vuln`).
+Activates deep enumeration mode. Amass performs active TLS/DNS scraping, Subfinder uses premium sources, and Nmap runs a full 65k port sweep with Service Versioning (`-sV`) and Vulnerability Scripting (`--script vuln`).
 
 ```bash
 ./asm -d example.com -deep
 ```
 
-*Note: Deep scans can take significantly longer (from minutes to hours) depending on the target's size and network firewall configurations.*
+*Note: Deep scans can take significantly longer depending on the target's size.*
 
 ### Interactive Database Viewer (TUI)
-
-The framework includes a built-in Terminal User Interface (TUI) to interactively browse your historical scan data, subdomains, open ports, and software versions without writing SQL queries.
+The framework includes a built-in Terminal User Interface (TUI) to interactively browse historical scan data, subdomains, open ports, web services, and vulnerabilities.
 
 ```bash
 ./asm -tui
@@ -86,8 +86,7 @@ The framework includes a built-in Terminal User Interface (TUI) to interactively
 *   `q` or `Ctrl+C`: Quit the application safely.
 
 ### Machine-Readable Output (JSON)
-
-For integration with external pipelines, SIEMs, or local LLMs, you can output the run's "delta" (only newly discovered assets) as a structured JSON object.
+Output the run's "delta" (only newly discovered assets) as a structured JSON object, ideal for integrating with SIEMs.
 
 ```bash
 ./asm -d example.com -json > delta.json
@@ -95,13 +94,10 @@ For integration with external pipelines, SIEMs, or local LLMs, you can output th
 
 ## Database Schema
 
-The core persistence layer is a SQLite database (`asm.db`). It automatically manages schema migrations. 
-
-*   `subdomains`: Stores all unique, discovered subdomains and root domains.
-*   `ports`: Stores port numbers, service protocols, service versions, and state, linked to `subdomains`.
-*   `web_services`: Stores HTTP context (URL, Title, Tech Stack, Status), linked to `ports`.
-*   `endpoints`: Stores deep URL paths and parameters, linked to `subdomains`.
-
-## Future Roadmap
-
-Please refer to the `plans.md` file for the upcoming integrations, including Nuclei vulnerability scanning, Report Generation, and Threat Intelligence RSS matching.
+The core persistence layer is a SQLite database (`asm.db`). 
+*   `subdomains`: Unique discovered subdomains, root domains, and DNS resolution status.
+*   `ports`: Port numbers, service protocols, versions, and state (linked to subdomains).
+*   `web_services`: HTTP context including URL, Title, Tech Stack, and Status Codes.
+*   `endpoints`: Deep URL paths and parameters.
+*   `vulnerabilities`: Identified CVEs, ExploitDB matches, and severity details.
+*   `scans`: Metadata tracking execution time and status of runner tools.

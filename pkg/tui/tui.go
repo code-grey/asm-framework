@@ -244,7 +244,12 @@ func RunTUI(store storage.Storage) error {
 		updateVulnerabilities(row - 1)
 		if row > 0 && row-1 < len(currentPorts) {
 			p := currentPorts[row-1]
-			detailsPane.SetText(fmt.Sprintf("[yellow]Port:[white] %d\n[yellow]Service:[white] %s\n[yellow]Version:[teal] %s\n[yellow]State:[green] %s", p.Number, p.Service, p.Version, p.State))
+			text := fmt.Sprintf("[yellow]Port:[white] %d\n[yellow]Service:[white] %s\n[yellow]Version:[teal] %s\n[yellow]State:[green] %s", p.Number, p.Service, p.Version, p.State)
+			ws, err := store.GetWebServices(p.ID)
+			if err == nil && len(ws) > 0 {
+				text += fmt.Sprintf("\n\n[yellow]Web Context:[white] %s [%d]\n[yellow]Tech Stack:[white] %s", ws[0].URL, ws[0].StatusCode, ws[0].TechStack)
+			}
+			detailsPane.SetText(text)
 		} else {
 			detailsPane.Clear()
 		}
@@ -253,7 +258,14 @@ func RunTUI(store storage.Storage) error {
 	vulnTable.SetSelectionChangedFunc(func(row, column int) {
 		if row > 0 && row-1 < len(currentVulns) {
 			v := currentVulns[row-1]
-			detailsPane.SetText(fmt.Sprintf("[yellow]Vulnerability:[white] %s\n[yellow]Severity:[white] %s\n[yellow]ID/Template:[white] %s", v.Name, v.Severity, v.TemplateID))
+			text := fmt.Sprintf("[yellow]Vulnerability:[white] %s\n[yellow]Severity:[white] %s\n[yellow]ID/Template:[white] %s", v.Name, v.Severity, v.TemplateID)
+			if v.CVE != "" {
+				text += fmt.Sprintf("\n[yellow]CVE:[white] %s", v.CVE)
+			}
+			if v.CVSS > 0 {
+				text += fmt.Sprintf("\n[yellow]CVSS Score:[white] %.1f", v.CVSS)
+			}
+			detailsPane.SetText(text)
 		} else {
 			detailsPane.Clear()
 		}
@@ -274,7 +286,14 @@ func RunTUI(store storage.Storage) error {
 				row, _ := vulnTable.GetSelection()
 				if row > 0 && row-1 < len(currentVulns) {
 					v := currentVulns[row-1]
-					detailsPane.SetText(fmt.Sprintf("[yellow]Vulnerability:[white] %s\n[yellow]Severity:[white] %s\n[yellow]ID/Template:[white] %s", v.Name, v.Severity, v.TemplateID))
+					text := fmt.Sprintf("[yellow]Vulnerability:[white] %s\n[yellow]Severity:[white] %s\n[yellow]ID/Template:[white] %s", v.Name, v.Severity, v.TemplateID)
+					if v.CVE != "" {
+						text += fmt.Sprintf("\n[yellow]CVE:[white] %s", v.CVE)
+					}
+					if v.CVSS > 0 {
+						text += fmt.Sprintf("\n[yellow]CVSS Score:[white] %.1f", v.CVSS)
+					}
+					detailsPane.SetText(text)
 				}
 			}
 			return nil
@@ -292,7 +311,12 @@ func RunTUI(store storage.Storage) error {
 			row, _ := portTable.GetSelection()
 			if row > 0 && row-1 < len(currentPorts) {
 				p := currentPorts[row-1]
-				detailsPane.SetText(fmt.Sprintf("[yellow]Port:[white] %d\n[yellow]Service:[white] %s\n[yellow]Version:[teal] %s\n[yellow]State:[green] %s", p.Number, p.Service, p.Version, p.State))
+				text := fmt.Sprintf("[yellow]Port:[white] %d\n[yellow]Service:[white] %s\n[yellow]Version:[teal] %s\n[yellow]State:[green] %s", p.Number, p.Service, p.Version, p.State)
+				ws, err := store.GetWebServices(p.ID)
+				if err == nil && len(ws) > 0 {
+					text += fmt.Sprintf("\n\n[yellow]Web Context:[white] %s [%d]\n[yellow]Tech Stack:[white] %s", ws[0].URL, ws[0].StatusCode, ws[0].TechStack)
+				}
+				detailsPane.SetText(text)
 			} else {
 				detailsPane.Clear()
 			}

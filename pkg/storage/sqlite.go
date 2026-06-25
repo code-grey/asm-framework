@@ -73,6 +73,8 @@ func (s *SQLiteStorage) Init() error {
 		template_id TEXT NOT NULL,
 		name TEXT NOT NULL,
 		severity TEXT NOT NULL,
+		cve TEXT DEFAULT '',
+		cvss REAL DEFAULT 0.0,
 		matched_at TEXT NOT NULL,
 		discovered_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY(port_id) REFERENCES ports(id),
@@ -97,6 +99,8 @@ func (s *SQLiteStorage) Init() error {
 	// Graceful migration for existing databases
 	_, _ = s.db.Exec("ALTER TABLE ports ADD COLUMN version TEXT DEFAULT ''")
 	_, _ = s.db.Exec("ALTER TABLE subdomains ADD COLUMN is_alive INTEGER NOT NULL DEFAULT 1")
+	_, _ = s.db.Exec("ALTER TABLE vulnerabilities ADD COLUMN cve TEXT DEFAULT ''")
+	_, _ = s.db.Exec("ALTER TABLE vulnerabilities ADD COLUMN cvss REAL DEFAULT 0.0")
 
 	return nil
 }
@@ -247,22 +251,22 @@ func (s *SQLiteStorage) AddEndpoint(subdomainID int64, url string) (Endpoint, bo
 	return ep, isNew, nil
 }
 
-func (s *SQLiteStorage) AddVulnerability(portID int64, templateID, name, severity, matchedAt string) (Vulnerability, bool, error) {
+func (s *SQLiteStorage) AddVulnerability(portID int64, templateID, name, severity, cve string, cvss float64, matchedAt string) (Vulnerability, bool, error) {
 	var vuln Vulnerability
 	var isNew bool
 
 	_, err := s.db.Exec(`
-		INSERT INTO vulnerabilities (port_id, template_id, name, severity, matched_at, discovered_at) 
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO vulnerabilities (port_id, template_id, name, severity, cve, cvss, matched_at, discovered_at) 
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(port_id, template_id, matched_at) DO NOTHING
-	`, portID, templateID, name, severity, matchedAt, time.Now())
+	`, portID, templateID, name, severity, cve, cvss, matchedAt, time.Now())
 
 	if err != nil {
 		return vuln, false, err
 	}
 
-	err = s.db.QueryRow("SELECT id, port_id, template_id, name, severity, matched_at, discovered_at FROM vulnerabilities WHERE port_id = ? AND template_id = ? AND matched_at = ?", portID, templateID, matchedAt).
-		Scan(&vuln.ID, &vuln.PortID, &vuln.TemplateID, &vuln.Name, &vuln.Severity, &vuln.MatchedAt, &vuln.DiscoveredAt)
+	err = s.db.QueryRow("SELECT id, port_id, template_id, name, severity, cve, cvss, matched_at, discovered_at FROM vulnerabilities WHERE port_id = ? AND template_id = ? AND matched_at = ?", portID, templateID, matchedAt).
+		Scan(&vuln.ID, &vuln.PortID, &vuln.TemplateID, &vuln.Name, &vuln.Severity, &vuln.CVE, &vuln.CVSS, &vuln.MatchedAt, &vuln.DiscoveredAt)
 
 	if err == nil && time.Since(vuln.DiscoveredAt) < time.Second {
 		isNew = true
@@ -344,7 +348,7 @@ func (s *SQLiteStorage) GetEndpoints(subdomainID int64) ([]Endpoint, error) {
 }
 
 func (s *SQLiteStorage) GetVulnerabilities(portID int64) ([]Vulnerability, error) {
-	rows, err := s.db.Query("SELECT id, port_id, template_id, name, severity, matched_at, discovered_at FROM vulnerabilities WHERE port_id = ?", portID)
+	rows, err := s.db.Query("SELECT id, port_id, template_id, name, severity, cve, cvss, matched_at, discovered_at FROM vulnerabilities WHERE port_id = ?", portID)
 	if err != nil {
 		return nil, err
 	}
@@ -353,7 +357,7 @@ func (s *SQLiteStorage) GetVulnerabilities(portID int64) ([]Vulnerability, error
 	var vulns []Vulnerability
 	for rows.Next() {
 		var vuln Vulnerability
-		if err := rows.Scan(&vuln.ID, &vuln.PortID, &vuln.TemplateID, &vuln.Name, &vuln.Severity, &vuln.MatchedAt, &vuln.DiscoveredAt); err != nil {
+		if err := rows.Scan(&vuln.ID, &vuln.PortID, &vuln.TemplateID, &vuln.Name, &vuln.Severity, &vuln.CVE, &vuln.CVSS, &vuln.MatchedAt, &vuln.DiscoveredAt); err != nil {
 			return nil, err
 		}
 		vulns = append(vulns, vuln)

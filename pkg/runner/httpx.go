@@ -17,6 +17,8 @@ type HttpxResult struct {
 	Title      string   `json:"title"`
 	StatusCode int      `json:"status_code"`
 	Tech       []string `json:"tech"`
+	WebServer  string   `json:"webserver"`
+	CDNName    string   `json:"cdn_name"`
 }
 
 type Httpx struct{}
