@@ -92,6 +92,13 @@ Output the run's "delta" (only newly discovered assets) as a structured JSON obj
 ./asm -d example.com -json > delta.json
 ```
 
+### On-Demand Offline Reporting
+Generate a timestamped, interactive HTML dashboard and JSON report in the `internal-docs/reports/` directory directly from the existing database context, without triggering a new network scan.
+
+```bash
+./asm -d example.com -report-only
+```
+
 ## Database Schema
 
 The core persistence layer is a SQLite database (`asm.db`). 

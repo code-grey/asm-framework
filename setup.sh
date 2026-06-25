@@ -8,9 +8,9 @@ set -e
 echo "[*] Starting ASM Framework Dependency Installation..."
 
 # 1. Update and install basic system requirements
-echo "[*] Installing system dependencies (nmap, amass, exploitdb, jq)..."
+echo "[*] Installing system dependencies (nmap, amass, exploitdb, jq, massdns)..."
 sudo apt-get update
-sudo apt-get install -y nmap amass exploitdb jq libpcap-dev
+sudo apt-get install -y nmap amass exploitdb jq massdns libpcap-dev
 
 # 2. Check if Go is installed
 if ! command -v go &> /dev/null
@@ -38,6 +38,8 @@ go install github.com/lc/gau/v2/cmd/gau@latest
 echo "[*] Installing Nuclei..."
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 
+echo "[*] Installing Puredns..."
+go install github.com/d3mondev/puredns/v2@latest
 
 echo "[*] Installing Dalfox (for future fuzzing mode)..."
 go install github.com/hahwul/dalfox/v2@latest

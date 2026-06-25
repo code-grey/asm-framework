@@ -57,7 +57,9 @@ func Generate(store storage.Storage, baseFilename string, targetDomain string) e
 
 	var subs []storage.Subdomain
 	for _, sub := range allSubs {
-		if sub.Domain == targetDomain || strings.HasSuffix(sub.Domain, "."+targetDomain) || targetDomain == "localhost" {
+		// Only include the exact target domain or its subdomains.
+		// If targetDomain is empty, include all.
+		if sub.Domain == targetDomain || strings.HasSuffix(sub.Domain, "."+targetDomain) || targetDomain == "" {
 			subs = append(subs, sub)
 		}
 	}
